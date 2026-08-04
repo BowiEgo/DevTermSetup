@@ -3,61 +3,189 @@
 # ============================================
 #  终端一键配置脚本 (Linux)
 #  使用方式: source ./setup_terminal_linux.sh
+#  或: bash ./setup_terminal_linux.sh
 # ============================================
 
 # ---- ANSI 样式 ----
-BOLD='\033[1m'
-DIM='\033[2m'
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+BOLD='\033[1m'; DIM='\033[2m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; NC='\033[0m'
 
-BOX_TOP="╭──────────────────────────────────────────────────╮"
-BOX_BOT="╰──────────────────────────────────────────────────╯"
+# 详细日志文件
+SCRIPT_LOG="${TMPDIR:-/tmp}/devtermsetup-$(date +%Y%m%d%H%M%S).log"
+log() { printf '%s\n' "$*" >> "$SCRIPT_LOG" 2>/dev/null; }
+
+success() { printf "  ${GREEN}✓${NC} %s\n" "$*"; }
+warn()    { printf "  ${YELLOW}⚠${NC}  %s\n" "$*"; }
+error()   { printf "  ${RED}✗${NC} %s\n" "$*"; }
+step()    { printf "${YELLOW}${BOLD}▸ [%s]${NC} %s\n\n" "$1" "$2"; }
+info()    { printf "  ${DIM}%s${NC}\n" "$*"; }
+divider() { printf "${DIM}  ─────────────────────────────────────────${NC}\n"; }
 
 header() {
     echo ""
-    echo -e "${CYAN}${BOX_TOP}${NC}"
-    printf "│ ${CYAN}%-48s${NC} │\n" "  $1"
-    echo -e "${CYAN}${BOX_BOT}${NC}"
+    echo -e "${CYAN}╭────────────────────────────────────────────────────╮${NC}"
+    printf "│ ${CYAN}%-52s${NC} │\n" "  $1"
+    echo -e "${CYAN}╰────────────────────────────────────────────────────╯${NC}"
     echo ""
 }
 
-success() { echo -e "  ${GREEN}✓${NC} $1"; }
-warn()    { echo -e "  ${YELLOW}⚠${NC}  $1"; }
-error()   { echo -e "  ${RED}✗${NC} $1"; }
-step()    { echo -e "${YELLOW}${BOLD}▸ [$1]${NC} $2"; echo ""; }
-info()    { echo -e "  ${DIM}$1${NC}"; }
-divider() { echo -e "${DIM}  ─────────────────────────────────────────${NC}"; }
-
-pending() {
-    local msg="$1"
-    shift
-    echo -ne "  ${YELLOW}⏳${NC} $msg ... "
-    "$@" > /tmp/.setup_terminal_log 2>&1 &
-    local pid=$!
-    local spin=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-    local i=0
-    while kill -0 $pid 2>/dev/null; do
-        echo -ne "\r  ${YELLOW}${spin[$i]}${NC} $msg ... "
-        i=$(( (i+1) % ${#spin[@]} ))
-        sleep 0.1
-    done
-    wait $pid
-    local ret=$?
-    if [ $ret -eq 0 ]; then
-        echo -e "\r  ${GREEN}✓${NC} $msg 完成"
+# 实时流式执行：\r 进度原地刷新不堆叠，普通行逐行输出；返回命令退出码
+stream() {
+    local label="$1"; shift
+    local ret
+    log "==> $label"
+    printf "  ${YELLOW}┌─${NC} %s\n" "$label"
+    "$@" 2>&1 | (
+        local c buf="" is_prog=0 prog_len=0
+        while IFS= read -r -n1 c; do
+            case "$c" in
+                $'\n')
+                    if [ "$is_prog" -eq 1 ]; then
+                        [ -n "$buf" ] && printf '\r  │ %-*s' "$prog_len" "$buf"
+                        printf '\n'
+                        is_prog=0
+                    elif [ -n "$buf" ]; then
+                        printf '  │ %s\n' "$buf"
+                        log "  │ $buf"
+                    fi
+                    buf=""; prog_len=0
+                    ;;
+                $'\r')
+                    if [ -n "$buf" ]; then
+                        if [ "${#buf}" -lt "$prog_len" ]; then
+                            printf '\r  │ %-*s' "$prog_len" "$buf"
+                        else
+                            printf '\r  │ %s' "$buf"
+                            prog_len=${#buf}
+                        fi
+                        is_prog=1
+                    fi
+                    buf=""
+                    ;;
+                *)
+                    buf+="$c"
+                    ;;
+            esac
+        done
+        if [ -n "$buf" ]; then
+            if [ "$is_prog" -eq 1 ]; then
+                printf '\r  │ %-*s' "$prog_len" "$buf"
+                printf '\n'
+            else
+                printf '  │ %s\n' "$buf"
+                log "  │ $buf"
+            fi
+        elif [ "$is_prog" -eq 1 ]; then
+            printf '\n'
+        fi
+    )
+    ret=${PIPESTATUS[0]}
+    if [ "$ret" -eq 0 ]; then
+        printf "  ${GREEN}└─ ✓${NC} %s 完成\n" "$label"
+        log "==> OK: $label"
     else
-        echo -e "\r  ${RED}✗${NC} $msg 失败"
-        cat /tmp/.setup_terminal_log
+        printf "  ${RED}└─ ✗${NC} %s 失败 (退出码 $ret)\n" "$label"
+        log "==> FAIL: $label (exit $ret)"
     fi
-    return $ret
+    return "$ret"
 }
 
-# ---- 检测包管理器 ----
+# 下载（curl 原生进度条，经 stream 原地刷新）
+download() {
+    local url="$1" dest="$2" label="$3"
+    stream "$label" curl -fSL --retry 3 -# -o "$dest" "$url"
+}
+
+# 工具安装：包管理器 → 官方安装器(询问) → 兜底重检
+install_tool() {
+    local step="$1" cmd="$2" pkg="$3" official_fn="$4" official_info="$5"
+    local n=1 answer
+    if command -v "$cmd" >/dev/null 2>&1; then
+        success "$cmd 已安装 ($(command -v "$cmd"))"
+        return 0
+    fi
+    if [ "$PKG" != "unknown" ]; then
+        if stream "[$step.$n] ${PKG} 安装 $cmd ($pkg)" $INSTALL "$pkg"; then
+            hash -r 2>/dev/null
+            if command -v "$cmd" >/dev/null 2>&1; then
+                success "$cmd 安装完成"
+                return 0
+            fi
+        fi
+        warn "$cmd: ${PKG} 失败，尝试其他方式"
+        n=$((n+1))
+    fi
+    if [ -n "$official_fn" ]; then
+        echo ""
+        warn "无法自动安装 $cmd"
+        [ -n "$official_info" ] && printf "  ${YELLOW}⚠${NC}  %s\n" "$official_info"
+        read -p "  是否自动安装 $cmd？[Y/n]: " answer
+        answer=${answer:-y}
+        case "$answer" in
+            [yY]*)
+                if "$official_fn"; then
+                    hash -r 2>/dev/null
+                    success "$cmd 安装完成"
+                    return 0
+                fi
+                warn "$cmd: 自动安装失败"
+                ;;
+            *) warn "已跳过 $cmd 自动安装" ;;
+        esac
+    fi
+    hash -r 2>/dev/null
+    if command -v "$cmd" >/dev/null 2>&1; then
+        success "$cmd 已可用"
+        return 0
+    fi
+    error "无法安装 $cmd，请手动安装"
+    return 1
+}
+
+# herdr 官方安装：解析 manifest → 带进度下载 → 安装到 ~/.local/bin
+install_herdr() {
+    local os arch target manifest url version bin
+    os="$(uname -s)"
+    case "$os" in
+        Linux) os="linux" ;;
+        *) error "不支持的平台: $os"; return 1 ;;
+    esac
+    arch="$(uname -m)"
+    case "$arch" in
+        x86_64|amd64) arch="x86_64" ;;
+        aarch64|arm64) arch="aarch64" ;;
+        *) error "不支持的架构: $arch"; return 1 ;;
+    esac
+    target="${os}-${arch}"
+    info "目标: ${os}/${arch}"
+    manifest="$(curl -fsSL --retry 3 --connect-timeout 10 --max-time 30 https://herdr.dev/latest.json 2>/dev/null)" || {
+        error "获取 herdr 版本信息失败"
+        return 1
+    }
+    url="$(printf '%s\n' "$manifest" | grep -oE "\"${target}\"[[:space:]]*:[[:space:]]*\"[^\"]+\"" | head -1 | sed -E 's/.*"(https?:\/\/[^"]+)".*/\1/')"
+    version="$(printf '%s\n' "$manifest" | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | grep -oE '"[^"]+"$' | tr -d '"')"
+    if [ -z "$url" ]; then
+        error "manifest 中未找到 ${target} 资产"
+        return 1
+    fi
+    bin="$HOME/.local/bin/herdr"
+    mkdir -p "$HOME/.local/bin"
+    if stream "下载 herdr v${version:-latest}" curl -fSL --retry 3 -# -o "$bin.tmp" "$url"; then
+        mv "$bin.tmp" "$bin"
+        chmod +x "$bin"
+        success "herdr 已安装到 $bin"
+        case ":${PATH}:" in
+            *":$HOME/.local/bin:"*) ;;
+            *) warn "~/.local/bin 不在 PATH，请添加: export PATH=\"$HOME/.local/bin:\$PATH\"" ;;
+        esac
+        return 0
+    fi
+    rm -f "$bin.tmp"
+    return 1
+}
+
+# ---- 检测系统与包管理器 ----
 if [ -f /etc/os-release ]; then
     . /etc/os-release
     OS_NAME="$ID"
@@ -79,10 +207,11 @@ header "🐧 终端一键配置 (Linux)"
 
 info "系统: $OS_PRETTY"
 info "包管理器: $PKG"
+info "日志: $SCRIPT_LOG"
 echo ""
 
 if [ "$PKG" = "unknown" ]; then
-    error "未识别的包管理器，将跳过自动安装"
+    warn "未识别的包管理器，将跳过自动安装"
     echo ""
 fi
 
@@ -123,59 +252,19 @@ echo ""
 # --------------------------------------------
 step "2/4" "检查终端工具"
 
-# 确保 git
-if ! command -v git &>/dev/null; then
-    if [ "$PKG" != "unknown" ]; then
-        pending "安装 git" $INSTALL git
-    else
-        error "请先手动安装 git"
-        read -p "  按回车键退出..."
-        return 1 2>/dev/null || exit 1
-    fi
-fi
+# Git 先装
+install_tool "2.1" git git
 
-install_pkg() {
-    local cmd="$1" pkg="$2"
-    if command -v "$cmd" &>/dev/null; then
-        success "$pkg 已安装 ($(command -v "$cmd"))"
-    elif [ "$PKG" != "unknown" ]; then
-        pending "${PKG} install $pkg" $INSTALL "$pkg"
-    else
-        error "跳过 $pkg（未知包管理器）"
-    fi
-}
-
-install_cargo_pkg() {
-    local cmd="$1" pkg="$2"
-    if command -v "$cmd" &>/dev/null; then
-        success "$pkg 已安装"
-        return
-    fi
-    if ! command -v cargo &>/dev/null; then
-        pending "安装 Rust toolchain" bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'
-        source "$HOME/.cargo/env"
-    fi
-    pending "cargo install $pkg" cargo install "$pkg"
-}
-
+# 更新包索引
 if [ "$PKG" != "unknown" ]; then
-    pending "更新包索引" $UPDATE
+    stream "更新包索引" $UPDATE
 fi
 
-install_pkg wezterm  wezterm
-install_pkg nvim     neovim
-install_pkg lazygit  lazygit
-
-# herdr: 优先包管理器，回退 cargo
-if ! command -v herdr &>/dev/null; then
-    if [ "$PKG" != "unknown" ]; then
-        install_pkg herdr herdr 2>/dev/null || install_cargo_pkg herdr herdr
-    else
-        install_cargo_pkg herdr herdr
-    fi
-else
-    success "herdr 已安装 ($(command -v herdr))"
-fi
+install_tool "2.2" wezterm wezterm
+install_tool "2.3" nvim neovim
+install_tool "2.4" lazygit lazygit
+HDRDR_INFO="Herdr 将下载约 22MB 预编译二进制，下载时显示实时进度，视网络情况约需 10 秒 - 2 分钟"
+install_tool "2.5" herdr herdr install_herdr "$HDRDR_INFO"
 echo ""
 
 # --------------------------------------------
@@ -208,7 +297,11 @@ if [ -d "$NVIM_CONFIG" ]; then
     warn "已备份旧 nvim 配置 → ${BACKUP##*/}"
 fi
 
-pending "git clone my-nvim" git clone "$REPO_URL" "$NVIM_CONFIG"
+if stream "git clone my-nvim" git clone --progress "$REPO_URL" "$NVIM_CONFIG" && [ -d "$NVIM_CONFIG/.git" ]; then
+    success "nvim 配置克隆完成 → $NVIM_CONFIG"
+else
+    error "克隆失败，请检查网络和仓库地址"
+fi
 echo ""
 
 # --------------------------------------------
@@ -222,6 +315,8 @@ echo ""
 echo -e "    ${CYAN}export http_proxy=${http_proxy:-your_proxy}${NC}"
 echo -e "    ${CYAN}export https_proxy=${https_proxy:-your_proxy}${NC}"
 echo -e "    ${CYAN}export all_proxy=${all_proxy:-your_proxy}${NC}"
+echo ""
+echo -e "  ${CYAN}详细安装日志: $SCRIPT_LOG${NC}"
 echo ""
 
 read -p "  按回车键退出..."

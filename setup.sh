@@ -1,11 +1,11 @@
 #!/bin/bash
 # ============================================
-#  终端一键配置 — 远程一键执行
+#  终端一键配置 — 统一版 (macOS / Linux)
 #
-#  macOS / Linux:
-#    curl -fsSL https://raw.githubusercontent.com/<user>/<repo>/main/setup.sh | bash
+#  远程一键执行:
+#    curl -fsSL https://raw.githubusercontent.com/BowiEgo/DevTermSetup/main/setup.sh | bash
 #
-#  也支持本地 source 执行以保留代理设置:
+#  本地 source 执行以保留代理设置:
 #    source ./setup.sh
 # ============================================
 
@@ -14,43 +14,179 @@ BOLD='\033[1m'; DIM='\033[2m'
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; NC='\033[0m'
 
-BOX_TOP="╭──────────────────────────────────────────────────╮"
-BOX_BOT="╰──────────────────────────────────────────────────╯"
+# 详细日志文件
+SCRIPT_LOG="${TMPDIR:-/tmp}/devtermsetup-$(date +%Y%m%d%H%M%S).log"
+log() { printf '%s\n' "$*" >> "$SCRIPT_LOG" 2>/dev/null; }
+
+success() { printf "  ${GREEN}✓${NC} %s\n" "$*"; }
+warn()    { printf "  ${YELLOW}⚠${NC}  %s\n" "$*"; }
+error()   { printf "  ${RED}✗${NC} %s\n" "$*"; }
+step()    { printf "${YELLOW}${BOLD}▸ [%s]${NC} %s\n\n" "$1" "$2"; }
+info()    { printf "  ${DIM}%s${NC}\n" "$*"; }
+divider() { printf "${DIM}  ─────────────────────────────────────────${NC}\n"; }
 
 header() {
     echo ""
-    echo -e "${CYAN}${BOX_TOP}${NC}"
-    printf "│ ${CYAN}%-48s${NC} │\n" "  $1"
-    echo -e "${CYAN}${BOX_BOT}${NC}"
+    echo -e "${CYAN}╭────────────────────────────────────────────────────╮${NC}"
+    printf "│ ${CYAN}%-52s${NC} │\n" "  $1"
+    echo -e "${CYAN}╰────────────────────────────────────────────────────╯${NC}"
     echo ""
 }
-success() { echo -e "  ${GREEN}✓${NC} $1"; }
-warn()    { echo -e "  ${YELLOW}⚠${NC}  $1"; }
-error()   { echo -e "  ${RED}✗${NC} $1"; }
-step()    { echo -e "${YELLOW}${BOLD}▸ [$1]${NC} $2"; echo ""; }
-info()    { echo -e "  ${DIM}$1${NC}"; }
-divider() { echo -e "${DIM}  ─────────────────────────────────────────${NC}"; }
 
-pending() {
-    local msg="$1" pid ret
-    shift
-    echo -ne "  ${YELLOW}⏳${NC} $msg ... "
-    "$@" > /tmp/.setup_log 2>&1 &
-    pid=$!
-    local spin=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏') i=0
-    while kill -0 $pid 2>/dev/null; do
-        echo -ne "\r  ${YELLOW}${spin[$i]}${NC} $msg ... "
-        i=$(( (i+1) % ${#spin[@]} ))
-        sleep 0.1
-    done
-    wait $pid; ret=$?
-    if [ $ret -eq 0 ]; then
-        echo -e "\r  ${GREEN}✓${NC} $msg 完成"
+# 实时流式执行：\r 进度原地刷新不堆叠，普通行逐行输出；返回命令退出码
+stream() {
+    local label="$1"; shift
+    local ret
+    log "==> $label"
+    printf "  ${YELLOW}┌─${NC} %s\n" "$label"
+    "$@" 2>&1 | (
+        local c buf="" is_prog=0 prog_len=0
+        while IFS= read -r -n1 c; do
+            case "$c" in
+                $'\n')
+                    if [ "$is_prog" -eq 1 ]; then
+                        [ -n "$buf" ] && printf '\r  │ %-*s' "$prog_len" "$buf"
+                        printf '\n'
+                        is_prog=0
+                    elif [ -n "$buf" ]; then
+                        printf '  │ %s\n' "$buf"
+                        log "  │ $buf"
+                    fi
+                    buf=""; prog_len=0
+                    ;;
+                $'\r')
+                    if [ -n "$buf" ]; then
+                        if [ "${#buf}" -lt "$prog_len" ]; then
+                            printf '\r  │ %-*s' "$prog_len" "$buf"
+                        else
+                            printf '\r  │ %s' "$buf"
+                            prog_len=${#buf}
+                        fi
+                        is_prog=1
+                    fi
+                    buf=""
+                    ;;
+                *)
+                    buf+="$c"
+                    ;;
+            esac
+        done
+        if [ -n "$buf" ]; then
+            if [ "$is_prog" -eq 1 ]; then
+                printf '\r  │ %-*s' "$prog_len" "$buf"
+                printf '\n'
+            else
+                printf '  │ %s\n' "$buf"
+                log "  │ $buf"
+            fi
+        elif [ "$is_prog" -eq 1 ]; then
+            printf '\n'
+        fi
+    )
+    ret=${PIPESTATUS[0]}
+    if [ "$ret" -eq 0 ]; then
+        printf "  ${GREEN}└─ ✓${NC} %s 完成\n" "$label"
+        log "==> OK: $label"
     else
-        echo -e "\r  ${RED}✗${NC} $msg 失败"
-        cat /tmp/.setup_log
+        printf "  ${RED}└─ ✗${NC} %s 失败 (退出码 $ret)\n" "$label"
+        log "==> FAIL: $label (exit $ret)"
     fi
-    return $ret
+    return "$ret"
+}
+
+# 下载（curl 原生进度条，经 stream 原地刷新）
+download() {
+    local url="$1" dest="$2" label="$3"
+    stream "$label" curl -fSL --retry 3 -# -o "$dest" "$url"
+}
+
+# 工具安装：包管理器 → 官方安装器(询问) → 兜底重检
+install_tool() {
+    local step="$1" cmd="$2" pkg="$3" official_fn="$4" official_info="$5"
+    local n=1 answer
+    if command -v "$cmd" >/dev/null 2>&1; then
+        success "$cmd 已安装 ($(command -v "$cmd"))"
+        return 0
+    fi
+    if [ "$PKG" != "unknown" ]; then
+        if stream "[$step.$n] ${PKG} 安装 $cmd ($pkg)" $INSTALL "$pkg"; then
+            hash -r 2>/dev/null
+            if command -v "$cmd" >/dev/null 2>&1; then
+                success "$cmd 安装完成"
+                return 0
+            fi
+        fi
+        warn "$cmd: ${PKG} 失败，尝试其他方式"
+        n=$((n+1))
+    fi
+    if [ -n "$official_fn" ]; then
+        echo ""
+        warn "无法自动安装 $cmd"
+        [ -n "$official_info" ] && printf "  ${YELLOW}⚠${NC}  %s\n" "$official_info"
+        read -p "  是否自动安装 $cmd？[Y/n]: " answer
+        answer=${answer:-y}
+        case "$answer" in
+            [yY]*)
+                if "$official_fn"; then
+                    hash -r 2>/dev/null
+                    success "$cmd 安装完成"
+                    return 0
+                fi
+                warn "$cmd: 自动安装失败"
+                ;;
+            *) warn "已跳过 $cmd 自动安装" ;;
+        esac
+    fi
+    hash -r 2>/dev/null
+    if command -v "$cmd" >/dev/null 2>&1; then
+        success "$cmd 已可用"
+        return 0
+    fi
+    error "无法安装 $cmd，请手动安装"
+    return 1
+}
+
+# herdr 官方安装：解析 manifest → 带进度下载 → 安装到 ~/.local/bin
+install_herdr() {
+    local os arch target manifest url version bin
+    os="$(uname -s)"
+    case "$os" in
+        Linux) os="linux" ;;
+        Darwin) os="macos" ;;
+        *) error "不支持的平台: $os"; return 1 ;;
+    esac
+    arch="$(uname -m)"
+    case "$arch" in
+        x86_64|amd64) arch="x86_64" ;;
+        aarch64|arm64) arch="aarch64" ;;
+        *) error "不支持的架构: $arch"; return 1 ;;
+    esac
+    target="${os}-${arch}"
+    info "目标: ${os}/${arch}"
+    manifest="$(curl -fsSL --retry 3 --connect-timeout 10 --max-time 30 https://herdr.dev/latest.json 2>/dev/null)" || {
+        error "获取 herdr 版本信息失败"
+        return 1
+    }
+    url="$(printf '%s\n' "$manifest" | grep -oE "\"${target}\"[[:space:]]*:[[:space:]]*\"[^\"]+\"" | head -1 | sed -E 's/.*"(https?:\/\/[^"]+)".*/\1/')"
+    version="$(printf '%s\n' "$manifest" | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | grep -oE '"[^"]+"$' | tr -d '"')"
+    if [ -z "$url" ]; then
+        error "manifest 中未找到 ${target} 资产"
+        return 1
+    fi
+    bin="$HOME/.local/bin/herdr"
+    mkdir -p "$HOME/.local/bin"
+    if stream "下载 herdr v${version:-latest}" curl -fSL --retry 3 -# -o "$bin.tmp" "$url"; then
+        mv "$bin.tmp" "$bin"
+        chmod +x "$bin"
+        success "herdr 已安装到 $bin"
+        case ":${PATH}:" in
+            *":$HOME/.local/bin:"*) ;;
+            *) warn "~/.local/bin 不在 PATH，请添加: export PATH=\"$HOME/.local/bin:\$PATH\"" ;;
+        esac
+        return 0
+    fi
+    rm -f "$bin.tmp"
+    return 1
 }
 
 # ---- 检测平台 ----
@@ -66,13 +202,12 @@ esac
 # ---- 检测包管理器 ----
 if [ "$OS" = "macOS" ]; then
     if ! command -v brew &>/dev/null; then
-        error "未找到 Homebrew，请先安装: https://brew.sh"
-        read -p "  按回车键退出..."
-        exit 1
+        PKG="unknown"
+    else
+        PKG="brew"
+        INSTALL="brew install"
+        UPDATE="brew update"
     fi
-    PKG="brew"
-    INSTALL="brew install"
-    UPDATE="brew update"
 else
     if   command -v apt     &>/dev/null; then PKG="apt";     INSTALL="sudo apt install -y";     UPDATE="sudo apt update"
     elif command -v dnf     &>/dev/null; then PKG="dnf";     INSTALL="sudo dnf install -y";     UPDATE="sudo dnf check-update || true"
@@ -82,28 +217,31 @@ else
     else PKG="unknown"; fi
 fi
 
-# ---- 解析远程仓库地址 ----
-# 如果通过 curl pipe 执行，尝试推断原始仓库 URL 以下载 .wezterm.lua
-REMOTE_BASE=""
+# ---- 定位脚本源（本地 vs 远程）----
+REMOTE=0
+SCRIPT_DIR=""
 if [ -n "$BASH_SOURCE" ] && [ "${BASH_SOURCE[0]}" != "bash" ] && [ -f "${BASH_SOURCE[0]}" ]; then
-    # 本地执行：脚本所在目录
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 else
-    # 远程 pipe 执行：使用临时目录
+    REMOTE=1
     SCRIPT_DIR="$(mktemp -d)"
-    REMOTE_CLEANUP=1
+fi
+
+# 远程执行时默认从仓库拉取配置文件（可用 SETUP_REMOTE_BASE 覆盖）
+if [ "$REMOTE" -eq 1 ] && [ -z "$SETUP_REMOTE_BASE" ]; then
+    SETUP_REMOTE_BASE="https://raw.githubusercontent.com/BowiEgo/DevTermSetup/main"
 fi
 
 download_config() {
-    local filename="$1"
+    local filename="$1" dest="$2"
     # 本地优先
     if [ -f "$SCRIPT_DIR/$filename" ]; then
-        cp "$SCRIPT_DIR/$filename" "$2"
+        cp "$SCRIPT_DIR/$filename" "$dest"
         return 0
     fi
-    # 如果用户提供了 REMOTE_BASE 环境变量
+    # 远程下载（带进度）
     if [ -n "$SETUP_REMOTE_BASE" ]; then
-        pending "下载 $filename" curl -fsSLo "$2" "$SETUP_REMOTE_BASE/$filename"
+        download "$SETUP_REMOTE_BASE/$filename" "$dest" "下载 $filename"
         return $?
     fi
     return 1
@@ -114,8 +252,11 @@ header "🖥  终端一键配置"
 
 info "平台: $OS"
 info "包管理器: $PKG"
+info "日志: $SCRIPT_LOG"
 if [ "$PKG" = "unknown" ] && [ "$OS" = "Linux" ]; then
-    error "未识别的包管理器，将跳过部分自动安装"
+    warn "未识别的包管理器，将跳过部分自动安装"
+elif [ "$PKG" = "unknown" ]; then
+    error "未找到 Homebrew，请先安装: https://brew.sh"
 fi
 echo ""
 
@@ -143,8 +284,10 @@ case "$proxy_ok" in
         warn "已跳过代理设置"
         ;;
     *)
-        export http_proxy="$proxy_ok" https_proxy="$proxy_ok"
-        export HTTP_PROXY="$proxy_ok" HTTPS_PROXY="$proxy_ok"
+        export http_proxy="$proxy_ok"
+        export https_proxy="$proxy_ok"
+        export HTTP_PROXY="$proxy_ok"
+        export HTTPS_PROXY="$proxy_ok"
         export all_proxy="$proxy_ok"
         success "已临时激活代理: $proxy_ok"
         ;;
@@ -154,76 +297,41 @@ echo ""
 # --------------------------------------------
 step "2/4" "检查终端工具"
 
-if ! command -v git &>/dev/null; then
-    if [ "$PKG" != "unknown" ]; then
-        pending "安装 git" $INSTALL git
-    else
-        error "请先手动安装 git"
-        exit 1
-    fi
+# Git 先装
+install_tool "2.1" git git
+
+# 更新包索引
+if [ "$PKG" != "unknown" ]; then
+    stream "更新包索引" $UPDATE
 fi
 
-install_if_missing() {
-    local cmd="$1" pkg="$2"
-    if command -v "$cmd" &>/dev/null; then
-        success "$pkg 已安装 ($(command -v "$cmd"))"
-    elif [ "$PKG" != "unknown" ]; then
-        pending "$PKG install $pkg" $INSTALL "$pkg"
-    else
-        error "跳过 $pkg（未知包管理器）"
-    fi
-}
-
-install_cargo_pkg() {
-    local cmd="$1" pkg="$2"
-    if command -v "$cmd" &>/dev/null; then
-        success "$pkg 已安装"; return
-    fi
-    if ! command -v cargo &>/dev/null; then
-        pending "安装 Rust toolchain" bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'
-        source "$HOME/.cargo/env"
-    fi
-    pending "cargo install $pkg" cargo install "$pkg"
-}
-
-[ "$PKG" != "unknown" ] && pending "更新包索引" $UPDATE
-
-install_if_missing wezterm  wezterm
-install_if_missing nvim     neovim
-install_if_missing lazygit  lazygit
-
-# herdr: 优先包管理器，回退 cargo
-if ! command -v herdr &>/dev/null; then
-    if [ "$PKG" != "unknown" ]; then
-        install_if_missing herdr herdr 2>/dev/null || install_cargo_pkg herdr herdr
-    else
-        install_cargo_pkg herdr herdr
-    fi
-else
-    success "herdr 已安装 ($(command -v herdr))"
-fi
+install_tool "2.2" wezterm wezterm
+install_tool "2.3" nvim neovim
+install_tool "2.4" lazygit lazygit
+HDRDR_INFO="Herdr 将下载约 22MB 预编译二进制，下载时显示实时进度，视网络情况约需 10 秒 - 2 分钟"
+install_tool "2.5" herdr herdr install_herdr "$HDRDR_INFO"
 echo ""
 
 # --------------------------------------------
 step "3/4" "部署 WezTerm 配置"
 
 WZ_DST="$HOME/.wezterm.lua"
-
-# 尝试从本地/远程获取 .wezterm.lua
 WZ_COPIED=0
+
 if [ -f "$SCRIPT_DIR/.wezterm.lua" ]; then
     [ -f "$WZ_DST" ] && cp "$WZ_DST" "${WZ_DST}.backup.$(date +%Y%m%d%H%M%S)" && warn "已备份旧配置"
     cp "$SCRIPT_DIR/.wezterm.lua" "$WZ_DST"
     success ".wezterm.lua → ~/.wezterm.lua"
     WZ_COPIED=1
 elif download_config ".wezterm.lua" "$WZ_DST"; then
-    [ -f "$WZ_DST" ] && cp "$WZ_DST" "${WZ_DST}.backup.$(date +%Y%m%d%H%M%S)" && warn "已备份旧配置"
     success ".wezterm.lua → ~/.wezterm.lua (远程)"
     WZ_COPIED=1
-else
+fi
+
+if [ "$WZ_COPIED" -ne 1 ]; then
     warn "未找到 .wezterm.lua，跳过 WezTerm 配置"
-    warn "提示: 设置 SETUP_REMOTE_BASE 环境变量指向你的仓库"
-    warn "  export SETUP_REMOTE_BASE=https://raw.githubusercontent.com/<user>/<repo>/main"
+    warn "提示: 可用 SETUP_REMOTE_BASE 环境变量指定配置来源"
+    warn "  export SETUP_REMOTE_BASE=https://raw.githubusercontent.com/BowiEgo/DevTermSetup/main"
 fi
 echo ""
 
@@ -236,14 +344,20 @@ REPO_URL="https://github.com/BowiEgo/my-nvim.git"
 if [ -d "$NVIM_CONFIG" ]; then
     BACKUP="${NVIM_CONFIG}.backup.$(date +%Y%m%d%H%M%S)"
     mv "$NVIM_CONFIG" "$BACKUP"
-    warn "已备份旧 nvim 配置"
+    warn "已备份旧 nvim 配置 → ${BACKUP##*/}"
 fi
 
-pending "git clone my-nvim" git clone "$REPO_URL" "$NVIM_CONFIG"
+if stream "git clone my-nvim" git clone --progress "$REPO_URL" "$NVIM_CONFIG" && [ -d "$NVIM_CONFIG/.git" ]; then
+    success "nvim 配置克隆完成 → $NVIM_CONFIG"
+else
+    error "克隆失败，请检查网络和仓库地址"
+fi
 echo ""
 
-# ---- 清理 ----
-[ -n "$REMOTE_CLEANUP" ] && rm -rf "$SCRIPT_DIR"
+# ---- 清理远程临时目录 ----
+if [ "$REMOTE" -eq 1 ]; then
+    rm -rf "$SCRIPT_DIR" 2>/dev/null
+fi
 
 # --------------------------------------------
 divider
@@ -256,6 +370,8 @@ echo ""
 echo -e "    ${CYAN}export http_proxy=${http_proxy:-your_proxy}${NC}"
 echo -e "    ${CYAN}export https_proxy=${https_proxy:-your_proxy}${NC}"
 echo -e "    ${CYAN}export all_proxy=${all_proxy:-your_proxy}${NC}"
+echo ""
+echo -e "  ${CYAN}详细安装日志: $SCRIPT_LOG${NC}"
 echo ""
 
 read -p "  按回车键退出..."
