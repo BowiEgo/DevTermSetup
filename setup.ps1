@@ -17,40 +17,40 @@ function Write-Info($Text)   { Write-Host "  $Text" -ForegroundColor DarkGray }
 
 # ---- 定位脚本源（本地 vs 远程）----
 $LocalDir = if ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { $null }
-$RemoteBase = if ($env:SETUP_REMOTE_BASE) { $env:SETUP_REMOTE_BASE } else { "https://raw.githubusercontent.com/BowiEgo/DevTermSetup/main" }
+$RemoteBranches = @("nodeVersion", "main")
+function Get-RemoteScript {
+    param([string]$File, [string]$Dest)
+    if ($env:SETUP_REMOTE_BASE) {
+        try { Invoke-WebRequest -Uri "$env:SETUP_REMOTE_BASE/$File" -OutFile $Dest -UseBasicParsing -ErrorAction Stop; return $true } catch { return $false }
+    }
+    foreach ($b in $RemoteBranches) {
+        try {
+            Invoke-WebRequest -Uri "https://raw.githubusercontent.com/BowiEgo/DevTermSetup/$b/$File" -OutFile $Dest -UseBasicParsing -ErrorAction Stop
+            return $true
+        } catch {}
+    }
+    return $false
+}
 
 # ---- 代理检测（在安装 Node 之前）----
 Write-Host ""
 Write-Host "  DevTermSetup · 引导" -ForegroundColor Cyan
 Write-Host ""
-Write-Info "http_proxy  = $(if($env:http_proxy){$env:http_proxy}else{'未设置'})"
-Write-Info "https_proxy = $(if($env:https_proxy){$env:https_proxy}else{'未设置'})"
-Write-Info "all_proxy   = $(if($env:all_proxy){$env:all_proxy}else{'未设置'})"
+Write-Info "当前 http_proxy  = $(if($env:http_proxy){$env:http_proxy}else{'未设置'})"
+Write-Info "当前 https_proxy = $(if($env:https_proxy){$env:https_proxy}else{'未设置'})"
 Write-Host ""
-$proxy_ok = Read-Host "  代理设置是否正确？[Y/n/自定义地址]"
-if ([string]::IsNullOrEmpty($proxy_ok)) { $proxy_ok = "y" }
-switch -Wildcard ($proxy_ok) {
-    "y*" {
-        if ($env:http_proxy) {
-            $env:HTTP_PROXY  = $env:http_proxy
-            $env:HTTPS_PROXY = if($env:https_proxy){$env:https_proxy}else{$env:http_proxy}
-            $env:all_proxy   = if($env:all_proxy){$env:all_proxy}else{$env:http_proxy}
-            Write-Success "保持当前代理设置"
-        } else {
-            Write-Warn "未设置代理，将直连（可能较慢）"
-        }
-    }
-    "n*" { Write-Warn "跳过代理设置（直连）" }
-    default {
-        $env:http_proxy = $env:https_proxy = $env:HTTP_PROXY = $env:HTTPS_PROXY = $env:all_proxy = $proxy_ok
-        Write-Success "已临时激活代理: $proxy_ok"
-    }
-}
-# 验证代理连通性
-if ($env:https_proxy) {
+$default = if ($env:https_proxy) { $env:https_proxy } else { "http://127.0.0.1:7890" }
+Write-Info "回车使用默认: $default（输入覆盖；输入 direct 表示直连）"
+$proxy_ok = Read-Host "  代理地址"
+if ([string]::IsNullOrWhiteSpace($proxy_ok)) { $proxy_ok = $default }
+if ($proxy_ok -match "^(direct|none|off)$") {
+    Write-Warn "已选择直连（不使用代理）"
+} elseif ($proxy_ok) {
+    $env:http_proxy = $env:https_proxy = $env:HTTP_PROXY = $env:HTTPS_PROXY = $env:all_proxy = $proxy_ok
+    Write-Success "已使用代理: $proxy_ok"
     Write-Info "验证代理连通性..."
     try {
-        Invoke-WebRequest -Uri "https://raw.githubusercontent.com" -Proxy $env:https_proxy -TimeoutSec 8 -UseBasicParsing -Method Head -ErrorAction Stop | Out-Null
+        Invoke-WebRequest -Uri "https://raw.githubusercontent.com" -Proxy $proxy_ok -TimeoutSec 8 -UseBasicParsing -Method Head -ErrorAction Stop | Out-Null
         Write-Success "代理可用"
     } catch {
         Write-Warn "代理验证失败，继续尝试直连（可能较慢）"
@@ -92,9 +92,7 @@ if ($LocalDir -and (Test-Path (Join-Path $LocalDir "devterm-setup.js"))) {
 } else {
     $JS = Join-Path $env:TEMP "devterm-setup.js"
     Write-Info "下载 devterm-setup.js ..."
-    try {
-        Invoke-WebRequest -Uri "$RemoteBase/devterm-setup.js" -OutFile $JS -UseBasicParsing
-    } catch {
+    if (-not (Get-RemoteScript "devterm-setup.js" $JS)) {
         Write-Error2 "下载失败，请检查网络"
         exit 1
     }

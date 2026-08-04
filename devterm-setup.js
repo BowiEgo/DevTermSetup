@@ -23,7 +23,19 @@ const { spawn, spawnSync } = require('child_process');
 const readline = require('readline');
 
 /* ================= 常量 ================= */
-const REPO_BASE = process.env.SETUP_REMOTE_BASE || 'https://raw.githubusercontent.com/BowiEgo/DevTermSetup/main';
+/* ================= 常量 ================= */
+const VERSION = '2.0.0';
+// 远程配置源：按顺序尝试分支（SETUP_REMOTE_BASE 可覆盖）；合并到 main 后调整顺序
+const REMOTE_BRANCHES = ['nodeVersion', 'main'];
+async function fetchRemote(file, dest, label) {
+  const bases = process.env.SETUP_REMOTE_BASE
+    ? [process.env.SETUP_REMOTE_BASE]
+    : REMOTE_BRANCHES.map((b) => `https://raw.githubusercontent.com/BowiEgo/DevTermSetup/${b}`);
+  for (const base of bases) {
+    if (await downloadWithProgress(`${base}/${file}`, dest, label || `下载 ${file}`)) return true;
+  }
+  return false;
+}
 const IS_WINDOWS = process.platform === 'win32';
 const IS_MACOS = process.platform === 'darwin';
 const IS_LINUX = process.platform === 'linux';
@@ -72,7 +84,7 @@ function welcome() {
   out(`  ${C.Cyan}${C.B}  ║       DevTermSetup · 终端环境一键配置         ║${C.R}`);
   out(`  ${C.Cyan}${C.B}  ╚═══════════════════════════════════════════════╝${C.R}`);
   out('');
-  out(`  ${C.D}  跨平台: Windows / macOS / Linux    Node ${process.version}${C.R}`);
+  out(`  ${C.D}  跨平台: Windows / macOS / Linux    Node ${process.version}    v${VERSION}${C.R}`);
   out(`  ${C.D}  日志: ${LOG_FILE}${C.R}`);
   out('');
 }
@@ -462,27 +474,40 @@ function ask(question, def = '') {
     rl.question(`${question} `, (a) => { rl.close(); res(a.trim() || def); });
   });
 }
+// 可编辑默认值的输入框：TTY 下预填（可直接输入覆盖、backspace 修改），回车用默认
+function askEdit(question, initial = '') {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (a) => { if (!done) { done = true; rl.close(); resolve(a); } };
+    rl.question(`${question} `, finish);
+    rl.on('close', () => finish(''));
+    if (process.stdin.isTTY && initial) rl.write(initial);
+  });
+}
 async function pressEnter() { await ask('  按回车键退出...', ''); }
 
 function keySelect(title, items) {
   return new Promise((resolve) => {
     let cursor = 0, rendered = false;
     const total = items.length + 2;
+    const hide = () => process.stdout.write('\x1b[?25l');
+    const show = () => process.stdout.write('\x1b[?25h');
     const render = () => {
       if (rendered) process.stdout.write(`\x1b[${total}A`);
       process.stdout.write(`\x1b[2K  ${C.Yellow}${C.B}${title}${C.R}\n`);
       items.forEach((it, i) => {
-        process.stdout.write(`\x1b[2K  ${i === cursor ? `${C.Cyan}>${C.R}` : ' '} ${it.name}\n`);
+        process.stdout.write(`\x1b[2K  ${i === cursor ? `${C.Cyan}❯${C.R}` : ' '} ${it.name}\n`);
       });
-      process.stdout.write(`\x1b[2K  ${C.D}↑/↓ 移动，回车确认${C.R}\n`);
+      process.stdout.write(`\x1b[2K  ${C.D}↑/↓ 移动 · 回车确认 · Ctrl+C 取消${C.R}\n`);
       rendered = true;
     };
-    const cleanup = () => { process.stdin.setRawMode(false); process.stdin.removeListener('keypress', onKey); process.stdin.pause(); };
+    const cleanup = (val) => { show(); try { process.stdin.setRawMode(false); } catch {} process.stdin.removeListener('keypress', onKey); process.stdin.pause(); resolve(val); };
     const onKey = (str, key) => {
       if (key.name === 'up') { cursor = (cursor - 1 + items.length) % items.length; render(); }
       else if (key.name === 'down') { cursor = (cursor + 1) % items.length; render(); }
-      else if (key.name === 'return') { cleanup(); resolve(items[cursor].value); }
-      else if (key.ctrl && key.name === 'c') { cleanup(); process.exit(130); }
+      else if (key.name === 'return') { cleanup(items[cursor].value); }
+      else if (key.ctrl && key.name === 'c') { cleanup(null); process.exit(130); }
     };
     try {
       readline.emitKeypressEvents(process.stdin);
@@ -493,6 +518,7 @@ function keySelect(title, items) {
       resolve(items[0].value);
       return;
     }
+    hide();
     render();
   });
 }
@@ -502,32 +528,41 @@ function multiSelect(title, items, defaults) {
     let cursor = 0, rendered = false;
     const selected = new Set(defaults || items.map((_, i) => i));
     const total = items.length + 3;
+    const hide = () => process.stdout.write('\x1b[?25l');
+    const show = () => process.stdout.write('\x1b[?25h');
     const render = () => {
       if (rendered) process.stdout.write(`\x1b[${total}A`);
       process.stdout.write(`\x1b[2K  ${C.Yellow}${C.B}${title}${C.R}\n`);
       items.forEach((it, i) => {
-        const mark = selected.has(i) ? `${C.Green}[✓]${C.R}` : '[ ]';
-        process.stdout.write(`\x1b[2K  ${i === cursor ? `${C.Cyan}>${C.R}` : ' '} ${mark} ${it.name}\n`);
+        const mark = selected.has(i) ? `${C.Green}●${C.R}` : '○';
+        process.stdout.write(`\x1b[2K  ${i === cursor ? `${C.Cyan}❯${C.R}` : ' '} ${mark} ${it.name}\n`);
       });
-      process.stdout.write(`\x1b[2K  ${C.D}↑/↓ 移动，空格 选择/取消，回车 确认${C.R}\n`);
+      process.stdout.write(`\x1b[2K  ${C.D}↑/↓ 移动 · 空格 选择/取消 · a 全选/全不选 · 回车 确认${C.R}\n`);
       rendered = true;
     };
-    const cleanup = () => { process.stdin.setRawMode(false); process.stdin.removeListener('keypress', onKey); process.stdin.pause(); };
+    const cleanup = (val) => { show(); try { process.stdin.setRawMode(false); } catch {} process.stdin.removeListener('keypress', onKey); process.stdin.pause(); resolve(val); };
     const onKey = (str, key) => {
       if (key.name === 'up') { cursor = (cursor - 1 + items.length) % items.length; render(); }
       else if (key.name === 'down') { cursor = (cursor + 1) % items.length; render(); }
       else if (key.name === 'space') { selected.has(cursor) ? selected.delete(cursor) : selected.add(cursor); render(); }
-      else if (key.name === 'return') { cleanup(); resolve([...selected].map((i) => items[i].value)); }
-      else if (key.ctrl && key.name === 'c') { cleanup(); process.exit(130); }
+      else if (key.name === 'a') {
+        if (selected.size === items.length) selected.clear();
+        else items.forEach((_, i) => selected.add(i));
+        render();
+      }
+      else if (key.name === 'return') { cleanup([...selected].map((i) => items[i].value)); }
+      else if (key.ctrl && key.name === 'c') { cleanup(null); process.exit(130); }
     };
     try {
       readline.emitKeypressEvents(process.stdin);
       process.stdin.setRawMode(true);
       process.stdin.on('keypress', onKey);
     } catch {
+      // 非 TTY：默认全选
       resolve([...selected].map((i) => items[i].value));
       return;
     }
+    hide();
     render();
   });
 }
@@ -537,12 +572,12 @@ async function getConfigDir() {
   // 本地运行：脚本所在目录（含 .wezterm.lua / .herdr.config.toml）
   const local = path.resolve(__dirname);
   if (fs.existsSync(path.join(local, '.wezterm.lua'))) return local;
-  // 远程运行：从仓库下载
+  // 远程运行：从仓库下载（多分支回退）
   out('');
   step('配置', '下载配置文件');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devtermsetup-cfg-'));
   for (const f of ['.wezterm.lua', '.herdr.config.toml']) {
-    if (!(await downloadWithProgress(`${REPO_BASE}/${f}`, path.join(dir, f), `下载 ${f}`))) return null;
+    if (!(await fetchRemote(f, path.join(dir, f)))) return null;
   }
   return dir;
 }
@@ -551,22 +586,22 @@ async function getConfigDir() {
 async function runInstall(selectedTools) {
   welcome();
   step('1/4', '网络代理设置');
-  info(`http_proxy  = ${process.env.http_proxy || '未设置'}`);
-  info(`https_proxy = ${process.env.https_proxy || '未设置'}`);
+  info(`当前 http_proxy  = ${process.env.http_proxy || '未设置'}`);
+  info(`当前 https_proxy = ${process.env.https_proxy || '未设置'}`);
   out('');
-  const ans = await ask('  代理设置是否正确？[Y/n/自定义地址]', 'y');
-  if (/^y/i.test(ans)) {
-    if (process.env.http_proxy) {
-      process.env.HTTP_PROXY = process.env.http_proxy;
-      process.env.HTTPS_PROXY = process.env.https_proxy || process.env.http_proxy;
-      process.env.all_proxy = process.env.all_proxy || process.env.http_proxy;
-    }
-    success('保持当前代理设置');
-  } else if (/^n/i.test(ans)) {
-    warn('已跳过代理设置');
+  const initial = process.env.https_proxy || process.env.http_proxy || 'http://127.0.0.1:7890';
+  const ans = await askEdit('  代理地址（回车=默认/当前，直接输入覆盖，清空回车=直连）', initial);
+  if (ans.trim()) {
+    const proxy = ans.trim();
+    process.env.http_proxy = process.env.https_proxy = process.env.HTTP_PROXY = process.env.HTTPS_PROXY = process.env.all_proxy = proxy;
+    success(`已使用代理: ${proxy}`);
+    info('验证代理连通性...');
+    try {
+      await httpsRequest('https://raw.githubusercontent.com');
+      success('代理可用');
+    } catch { warn('代理验证失败，继续尝试（可能较慢）'); }
   } else {
-    process.env.http_proxy = process.env.https_proxy = process.env.HTTP_PROXY = process.env.HTTPS_PROXY = process.env.all_proxy = ans;
-    success(`已临时激活代理: ${ans}`);
+    warn('已选择直连（不使用代理）');
   }
   out('');
 
@@ -685,8 +720,25 @@ function parseToolsArg() {
   }
   return null;
 }
+function printHelp() {
+  out(`DevTermSetup v${VERSION} — 终端环境一键配置 (Node.js)`);
+  out('');
+  out('  用法:');
+  out('    node devterm-setup.js                    欢迎界面 + 菜单');
+  out('    node devterm-setup.js install            安装（交互选择工具）');
+  out('    node devterm-setup.js install --tools git,wezterm,herdr   非交互指定工具');
+  out('    node devterm-setup.js repair             修复 / 同步配置');
+  out('    node devterm-setup.js doctor             健康检查');
+  out('    node devterm-setup.js --version          显示版本');
+  out('    node devterm-setup.js --help             显示帮助');
+  out('');
+  out('  环境变量: SETUP_REMOTE_BASE 指定远程配置源（默认按分支回退）');
+}
 async function main() {
-  const mode = process.argv[2] || 'menu';
+  const args = process.argv.slice(2);
+  if (args.includes('--help') || args.includes('-h') || args.includes('help')) { printHelp(); return; }
+  if (args.includes('--version') || args.includes('-V')) { out(`devterm-setup v${VERSION}`); return; }
+  const mode = args[0] || 'menu';
   if (mode === 'install') await runInstall(parseToolsArg());
   else if (mode === 'repair') await runRepair();
   else if (mode === 'doctor') await runDoctor();
