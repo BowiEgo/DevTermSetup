@@ -1,430 +1,89 @@
 #!/bin/bash
 # ============================================
-#  终端一键配置 — 统一版 (macOS / Linux)
+#  DevTermSetup — 引导脚本 (macOS / Linux)
+#  仅负责：确保 Node.js 存在 → 运行 Node 安装程序
 #
-#  远程一键执行:
+#  远程执行:
 #    curl -fsSL https://raw.githubusercontent.com/BowiEgo/DevTermSetup/main/setup.sh | bash
-#
-#  本地 source 执行以保留代理设置:
-#    source ./setup.sh
+#  本地执行:
+#    bash setup.sh [install|repair|doctor]
 # ============================================
 
-# ---- ANSI 样式 ----
+# ---- 样式 ----
 BOLD='\033[1m'; DIM='\033[2m'
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; NC='\033[0m'
-
-# 详细日志文件
-SCRIPT_LOG="${TMPDIR:-/tmp}/devtermsetup-$(date +%Y%m%d%H%M%S).log"
-log() { printf '%s\n' "$*" >> "$SCRIPT_LOG" 2>/dev/null; }
-
 success() { printf "  ${GREEN}✓${NC} %s\n" "$*"; }
-warn()    { printf "  ${YELLOW}⚠${NC}  %s\n" "$*"; }
 error()   { printf "  ${RED}✗${NC} %s\n" "$*"; }
-step()    { printf "${YELLOW}${BOLD}▸ [%s]${NC} %s\n\n" "$1" "$2"; }
 info()    { printf "  ${DIM}%s${NC}\n" "$*"; }
-divider() { printf "${DIM}  ─────────────────────────────────────────${NC}\n"; }
-
-header() {
-    echo ""
-    echo -e "${CYAN}╭────────────────────────────────────────────────────╮${NC}"
-    printf "│ ${CYAN}%-52s${NC} │\n" "  $1"
-    echo -e "${CYAN}╰────────────────────────────────────────────────────╯${NC}"
-    echo ""
-}
-
-# 实时流式执行：\r 进度原地刷新不堆叠，普通行逐行输出；返回命令退出码
-stream() {
-    local label="$1"; shift
-    local ret
-    log "==> $label"
-    printf "  ${YELLOW}┌─${NC} %s\n" "$label"
-    "$@" 2>&1 | (
-        local c buf="" is_prog=0 prog_len=0
-        while IFS= read -r -n1 c; do
-            case "$c" in
-                $'\n')
-                    if [ "$is_prog" -eq 1 ]; then
-                        [ -n "$buf" ] && printf '\r  │ %-*s' "$prog_len" "$buf"
-                        printf '\n'
-                        is_prog=0
-                    elif [ -n "$buf" ]; then
-                        printf '  │ %s\n' "$buf"
-                        log "  │ $buf"
-                    fi
-                    buf=""; prog_len=0
-                    ;;
-                $'\r')
-                    if [ -n "$buf" ]; then
-                        if [ "${#buf}" -lt "$prog_len" ]; then
-                            printf '\r  │ %-*s' "$prog_len" "$buf"
-                        else
-                            printf '\r  │ %s' "$buf"
-                            prog_len=${#buf}
-                        fi
-                        is_prog=1
-                    fi
-                    buf=""
-                    ;;
-                *)
-                    buf+="$c"
-                    ;;
-            esac
-        done
-        if [ -n "$buf" ]; then
-            if [ "$is_prog" -eq 1 ]; then
-                printf '\r  │ %-*s' "$prog_len" "$buf"
-                printf '\n'
-            else
-                printf '  │ %s\n' "$buf"
-                log "  │ $buf"
-            fi
-        elif [ "$is_prog" -eq 1 ]; then
-            printf '\n'
-        fi
-    )
-    ret=${PIPESTATUS[0]}
-    if [ "$ret" -eq 0 ]; then
-        printf "  ${GREEN}└─ ✓${NC} %s 完成\n" "$label"
-        log "==> OK: $label"
-    else
-        printf "  ${RED}└─ ✗${NC} %s 失败 (退出码 $ret)\n" "$label"
-        log "==> FAIL: $label (exit $ret)"
-    fi
-    return "$ret"
-}
-
-# 下载（curl 原生进度条，经 stream 原地刷新）
-download() {
-    local url="$1" dest="$2" label="$3"
-    stream "$label" curl -fSL --retry 3 -# -o "$dest" "$url"
-}
-
-# 工具安装：包管理器 → 官方安装器(询问) → 兜底重检
-install_tool() {
-    local step="$1" cmd="$2" pkg="$3" official_fn="$4" official_info="$5"
-    local n=1 answer
-    if command -v "$cmd" >/dev/null 2>&1; then
-        success "$cmd 已安装 ($(command -v "$cmd"))"
-        return 0
-    fi
-    if [ "$PKG" != "unknown" ]; then
-        if stream "[$step.$n] ${PKG} 安装 $cmd ($pkg)" $INSTALL "$pkg"; then
-            hash -r 2>/dev/null
-            if command -v "$cmd" >/dev/null 2>&1; then
-                success "$cmd 安装完成"
-                return 0
-            fi
-        fi
-        warn "$cmd: ${PKG} 失败，尝试其他方式"
-        n=$((n+1))
-    fi
-    if [ -n "$official_fn" ]; then
-        echo ""
-        warn "无法自动安装 $cmd"
-        [ -n "$official_info" ] && printf "  ${YELLOW}⚠${NC}  %s\n" "$official_info"
-        read -p "  是否自动安装 $cmd？[Y/n]: " answer
-        answer=${answer:-y}
-        case "$answer" in
-            [yY]*)
-                if "$official_fn"; then
-                    hash -r 2>/dev/null
-                    success "$cmd 安装完成"
-                    return 0
-                fi
-                warn "$cmd: 自动安装失败"
-                ;;
-            *) warn "已跳过 $cmd 自动安装" ;;
-        esac
-    fi
-    hash -r 2>/dev/null
-    if command -v "$cmd" >/dev/null 2>&1; then
-        success "$cmd 已可用"
-        return 0
-    fi
-    error "无法安装 $cmd，请手动安装"
-    return 1
-}
-
-# herdr 官方安装：解析 manifest → 带进度下载 → 安装到 ~/.local/bin
-install_herdr() {
-    local os arch target manifest url version bin
-    os="$(uname -s)"
-    case "$os" in
-        Linux) os="linux" ;;
-        Darwin) os="macos" ;;
-        *) error "不支持的平台: $os"; return 1 ;;
-    esac
-    arch="$(uname -m)"
-    case "$arch" in
-        x86_64|amd64) arch="x86_64" ;;
-        aarch64|arm64) arch="aarch64" ;;
-        *) error "不支持的架构: $arch"; return 1 ;;
-    esac
-    target="${os}-${arch}"
-    info "目标: ${os}/${arch}"
-    manifest="$(curl -fsSL --retry 3 --connect-timeout 10 --max-time 30 https://herdr.dev/latest.json 2>/dev/null)" || {
-        error "获取 herdr 版本信息失败"
-        return 1
-    }
-    url="$(printf '%s\n' "$manifest" | grep -oE "\"${target}\"[[:space:]]*:[[:space:]]*\"[^\"]+\"" | head -1 | sed -E 's/.*"(https?:\/\/[^"]+)".*/\1/')"
-    version="$(printf '%s\n' "$manifest" | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | grep -oE '"[^"]+"$' | tr -d '"')"
-    if [ -z "$url" ]; then
-        error "manifest 中未找到 ${target} 资产"
-        return 1
-    fi
-    bin="$HOME/.local/bin/herdr"
-    mkdir -p "$HOME/.local/bin"
-    if stream "下载 herdr v${version:-latest}" curl -fSL --retry 3 -# -o "$bin.tmp" "$url"; then
-        mv "$bin.tmp" "$bin"
-        chmod +x "$bin"
-        success "herdr 已安装到 $bin"
-        case ":${PATH}:" in
-            *":$HOME/.local/bin:"*) ;;
-            *) warn "~/.local/bin 不在 PATH，请添加: export PATH=\"$HOME/.local/bin:\$PATH\"" ;;
-        esac
-        return 0
-    fi
-    rm -f "$bin.tmp"
-    return 1
-}
-
-# 解析默认 shell（与 .wezterm.lua 相同的回退策略：$SHELL → zsh → bash → fish → pwsh → sh）
-resolve_shell() {
-    local shell="$SHELL"
-    [ -n "$shell" ] && [ -x "$shell" ] && { echo "$shell"; return 0; }
-    local c p
-    for c in zsh bash fish pwsh sh; do
-        p="$(command -v "$c" 2>/dev/null)"
-        [ -n "$p" ] && { echo "$p"; return 0; }
-    done
-    echo "/bin/sh"
-}
-
-# 部署 herdr 配置：读取仓库模板(.herdr.config.toml) → 解析 shell → 替换占位符 → 写入
-deploy_herdr_config() {
-    local template_file="$1"
-    if [ ! -f "$template_file" ]; then
-        warn "未找到 herdr 配置模板，跳过"
-        return 1
-    fi
-    local shell_path config_file content
-    shell_path="$(resolve_shell)"
-    config_file="$HOME/.config/herdr/config.toml"
-    content="$(cat "$template_file")"
-    content="${content//__DEFAULT_SHELL__/$shell_path}"
-    if printf '%s' "$content" | grep -q '__DEFAULT_SHELL__'; then
-        warn "模板占位符未替换，跳过写入"
-        return 1
-    fi
-    mkdir -p "$(dirname "$config_file")"
-    if [ -f "$config_file" ]; then
-        cp "$config_file" "$config_file.backup.$(date +%Y%m%d%H%M%S)"
-        warn "已备份 herdr 配置 → ${config_file}.backup.*"
-    fi
-    printf '%s\n' "$content" > "$config_file"
-    success "herdr 配置已部署 → $config_file (default_shell: $shell_path)"
-}
-
-# ---- 检测平台 ----
-case "$(uname -s)" in
-    Darwin)  OS="macOS" ;;
-    Linux)   OS="Linux" ;;
-    *)
-        error "不支持的操作系统: $(uname -s)"
-        exit 1
-        ;;
-esac
-
-# ---- 检测包管理器 ----
-if [ "$OS" = "macOS" ]; then
-    if ! command -v brew &>/dev/null; then
-        PKG="unknown"
-    else
-        PKG="brew"
-        INSTALL="brew install"
-        UPDATE="brew update"
-    fi
-else
-    if   command -v apt     &>/dev/null; then PKG="apt";     INSTALL="sudo apt install -y";     UPDATE="sudo apt update"
-    elif command -v dnf     &>/dev/null; then PKG="dnf";     INSTALL="sudo dnf install -y";     UPDATE="sudo dnf check-update || true"
-    elif command -v pacman  &>/dev/null; then PKG="pacman";  INSTALL="sudo pacman -S --noconfirm"; UPDATE="sudo pacman -Sy"
-    elif command -v zypper  &>/dev/null; then PKG="zypper";  INSTALL="sudo zypper install -y";  UPDATE="sudo zypper refresh"
-    elif command -v apk     &>/dev/null; then PKG="apk";     INSTALL="sudo apk add";            UPDATE="sudo apk update"
-    else PKG="unknown"; fi
-fi
 
 # ---- 定位脚本源（本地 vs 远程）----
-REMOTE=0
-SCRIPT_DIR=""
+LOCAL_DIR=""
 if [ -n "$BASH_SOURCE" ] && [ "${BASH_SOURCE[0]}" != "bash" ] && [ -f "${BASH_SOURCE[0]}" ]; then
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-else
-    REMOTE=1
-    SCRIPT_DIR="$(mktemp -d)"
+    LOCAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
+REMOTE_BASE="${SETUP_REMOTE_BASE:-https://raw.githubusercontent.com/BowiEgo/DevTermSetup/main}"
 
-# 远程执行时默认从仓库拉取配置文件（可用 SETUP_REMOTE_BASE 覆盖）
-if [ "$REMOTE" -eq 1 ] && [ -z "$SETUP_REMOTE_BASE" ]; then
-    SETUP_REMOTE_BASE="https://raw.githubusercontent.com/BowiEgo/DevTermSetup/main"
-fi
+# ---- 确保 Node.js (>= 18) ----
+ensure_node() {
+    if command -v node >/dev/null 2>&1; then
+        local major
+        major="$(node -v | cut -d. -f1 | tr -d 'v')"
+        if [ "${major:-0}" -ge 18 ] 2>/dev/null; then
+            success "Node.js $(node -v) 已就绪"
+            return 0
+        fi
+        info "检测到 Node.js $(node -v)，但需要 18+，继续安装新版本"
+    else
+        echo ""
+        info "未检测到 Node.js，正在安装..."
+    fi
 
-download_config() {
-    local filename="$1" dest="$2"
-    # 本地优先
-    if [ -f "$SCRIPT_DIR/$filename" ]; then
-        cp "$SCRIPT_DIR/$filename" "$dest"
+    # 包管理器优先
+    if   command -v apt     &>/dev/null; then sudo apt update && sudo apt install -y nodejs npm
+    elif command -v dnf     &>/dev/null; then sudo dnf install -y nodejs npm
+    elif command -v pacman  &>/dev/null; then sudo pacman -S --noconfirm nodejs npm
+    elif command -v zypper  &>/dev/null; then sudo zypper install -y nodejs npm
+    elif command -v apk     &>/dev/null; then sudo apk add nodejs npm
+    elif command -v brew    &>/dev/null; then brew install node
+    fi 2>/dev/null
+
+    if command -v node >/dev/null 2>&1 && [ "$(node -v | cut -d. -f1 | tr -d 'v')" -ge 18 ] 2>/dev/null; then
+        success "Node.js $(node -v) 已就绪"
         return 0
     fi
-    # 远程下载（带进度）
-    if [ -n "$SETUP_REMOTE_BASE" ]; then
-        download "$SETUP_REMOTE_BASE/$filename" "$dest" "下载 $filename"
-        return $?
+
+    # 回退：nvm
+    info "包管理器安装失败，尝试 nvm..."
+    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+    export NVM_DIR="$HOME/.nvm"
+    [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+    nvm install --lts >/dev/null 2>&1
+    if command -v node >/dev/null 2>&1 && [ "$(node -v | cut -d. -f1 | tr -d 'v')" -ge 18 ] 2>/dev/null; then
+        success "Node.js $(node -v) 已就绪 (nvm)"
+        return 0
     fi
+    error "Node.js 安装失败，请手动安装: https://nodejs.org"
     return 1
 }
 
-# --------------------------------------------
-header "🖥  终端一键配置"
-
-info "平台: $OS"
-info "包管理器: $PKG"
-info "日志: $SCRIPT_LOG"
-if [ "$PKG" = "unknown" ] && [ "$OS" = "Linux" ]; then
-    warn "未识别的包管理器，将跳过部分自动安装"
-elif [ "$PKG" = "unknown" ]; then
-    error "未找到 Homebrew，请先安装: https://brew.sh"
-fi
 echo ""
+printf "  ${CYAN}${BOLD}DevTermSetup · 引导${NC}\n"
+ensure_node || exit 1
 
-# --------------------------------------------
-step "1/4" "网络代理设置"
-
-info "http_proxy  = ${http_proxy:-未设置}"
-info "https_proxy = ${https_proxy:-未设置}"
-info "all_proxy   = ${all_proxy:-未设置}"
-echo ""
-
-read -p "  代理设置是否正确？[Y/n/自定义地址]: " proxy_ok
-proxy_ok=${proxy_ok:-y}
-
-case "$proxy_ok" in
-    [yY]|[yY][eE][sS])
-        if [ -n "$http_proxy" ]; then
-            export HTTP_PROXY="$http_proxy"
-            export HTTPS_PROXY="${https_proxy:-$http_proxy}"
-            export all_proxy="${all_proxy:-$http_proxy}"
-        fi
-        success "保持当前代理设置"
-        ;;
-    [nN]|[nN][oO])
-        warn "已跳过代理设置"
-        ;;
-    *)
-        export http_proxy="$proxy_ok"
-        export https_proxy="$proxy_ok"
-        export HTTP_PROXY="$proxy_ok"
-        export HTTPS_PROXY="$proxy_ok"
-        export all_proxy="$proxy_ok"
-        success "已临时激活代理: $proxy_ok"
-        ;;
-esac
-echo ""
-
-# --------------------------------------------
-step "2/4" "检查终端工具"
-
-# Git 先装
-install_tool "2.1" git git
-
-# 更新包索引
-if [ "$PKG" != "unknown" ]; then
-    stream "更新包索引" $UPDATE
-fi
-
-install_tool "2.2" wezterm wezterm
-install_tool "2.3" nvim neovim
-install_tool "2.4" lazygit lazygit
-HDRDR_INFO="Herdr 将下载约 22MB 预编译二进制，下载时显示实时进度，视网络情况约需 10 秒 - 2 分钟"
-install_tool "2.5" herdr herdr install_herdr "$HDRDR_INFO"
-echo ""
-
-# --------------------------------------------
-step "3/4" "部署 WezTerm 配置"
-
-WZ_DST="$HOME/.wezterm.lua"
-WZ_COPIED=0
-
-if [ -f "$SCRIPT_DIR/.wezterm.lua" ]; then
-    [ -f "$WZ_DST" ] && cp "$WZ_DST" "${WZ_DST}.backup.$(date +%Y%m%d%H%M%S)" && warn "已备份旧配置"
-    cp "$SCRIPT_DIR/.wezterm.lua" "$WZ_DST"
-    success ".wezterm.lua → ~/.wezterm.lua"
-    WZ_COPIED=1
-elif download_config ".wezterm.lua" "$WZ_DST"; then
-    success ".wezterm.lua → ~/.wezterm.lua (远程)"
-    WZ_COPIED=1
-fi
-
-if [ "$WZ_COPIED" -ne 1 ]; then
-    warn "未找到 .wezterm.lua，跳过 WezTerm 配置"
-    warn "提示: 可用 SETUP_REMOTE_BASE 环境变量指定配置来源"
-    warn "  export SETUP_REMOTE_BASE=https://raw.githubusercontent.com/BowiEgo/DevTermSetup/main"
-fi
-echo ""
-
-# 部署 herdr 配置（模板 .herdr.config.toml，与 .wezterm.lua 同方式读取）
-if command -v herdr >/dev/null 2>&1; then
-    printf "  ${YELLOW}┌─${NC} 部署 herdr 配置\n"
-    if [ -f "$SCRIPT_DIR/.herdr.config.toml" ]; then
-        deploy_herdr_config "$SCRIPT_DIR/.herdr.config.toml"
-    elif download_config ".herdr.config.toml" "$SCRIPT_DIR/.herdr.config.toml.dl"; then
-        deploy_herdr_config "$SCRIPT_DIR/.herdr.config.toml.dl"
-    else
-        warn "未找到 .herdr.config.toml，跳过 herdr 配置"
+# ---- 获取并运行 Node 安装程序 ----
+if [ -n "$LOCAL_DIR" ] && [ -f "$LOCAL_DIR/devterm-setup.js" ]; then
+    JS="$LOCAL_DIR/devterm-setup.js"
+else
+    JS="$(mktemp /tmp/devterm-setup.XXXXXX.js)"
+    info "下载 devterm-setup.js ..."
+    if ! curl -fsSL -# -o "$JS" "$REMOTE_BASE/devterm-setup.js"; then
+        error "下载失败，请检查网络"
+        rm -f "$JS"
+        exit 1
     fi
-    stream "herdr config check" herdr config check
-else
-    info "未安装 herdr，跳过 herdr 配置"
-fi
-echo ""
-
-# --------------------------------------------
-step "4/4" "部署 Neovim 配置"
-
-NVIM_CONFIG="$HOME/.config/nvim"
-REPO_URL="https://github.com/BowiEgo/my-nvim.git"
-
-if [ -d "$NVIM_CONFIG" ]; then
-    BACKUP="${NVIM_CONFIG}.backup.$(date +%Y%m%d%H%M%S)"
-    mv "$NVIM_CONFIG" "$BACKUP"
-    warn "已备份旧 nvim 配置 → ${BACKUP##*/}"
+    trap 'rm -f "$JS"' EXIT
 fi
 
-if stream "git clone my-nvim" git clone --progress "$REPO_URL" "$NVIM_CONFIG" && [ -d "$NVIM_CONFIG/.git" ]; then
-    success "nvim 配置克隆完成 → $NVIM_CONFIG"
-else
-    error "克隆失败，请检查网络和仓库地址"
-fi
-echo ""
-
-# ---- 清理远程临时目录 ----
-if [ "$REMOTE" -eq 1 ]; then
-    rm -rf "$SCRIPT_DIR" 2>/dev/null
-fi
-
-# --------------------------------------------
-divider
-echo ""
-echo -e "  ${GREEN}${BOLD}✓  配置完成！${NC}"
-echo ""
-echo -e "  ${DIM}代理设置仅对当前终端会话生效。${NC}"
-echo -e "  ${DIM}持久化请追加到 shell 配置文件：${NC}"
-echo ""
-echo -e "    ${CYAN}export http_proxy=${http_proxy:-your_proxy}${NC}"
-echo -e "    ${CYAN}export https_proxy=${https_proxy:-your_proxy}${NC}"
-echo -e "    ${CYAN}export all_proxy=${all_proxy:-your_proxy}${NC}"
-echo ""
-echo -e "  ${CYAN}详细安装日志: $SCRIPT_LOG${NC}"
-echo ""
-
-read -p "  按回车键退出..."
+# 运行 Node 安装程序（保留代理环境变量）
+node "$JS" "$@"
