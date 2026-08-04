@@ -35,21 +35,18 @@ function Write-Divider()      { Write-Host ("  " + ("─" * 40)) -ForegroundColo
 
 function Invoke-Pending($Msg, $ScriptBlock) {
     Write-Host "  ⏳ $Msg ... " -NoNewline -ForegroundColor Yellow
-    $spinner = @('⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏')
-    $job = Start-Job -ScriptBlock $ScriptBlock
-    $i = 0
-    while ($job.State -eq 'Running') {
-        Write-Host "`r  $($spinner[$i]) $Msg ... " -NoNewline -ForegroundColor Yellow
-        $i = ($i + 1) % $spinner.Length
-        Start-Sleep -Milliseconds 100
+    # 同步执行：脚本块与调用方同作用域，父级变量/代理环境变量直接可用；
+    # 脚本块须以显式布尔表达式结尾（如 $LASTEXITCODE -eq 0）表示成败。
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $ok = & $ScriptBlock
+    $sw.Stop()
+    $secs = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+    if ($ok) {
+        Write-Host "`r  ✓ $Msg 完成 (${secs}s)" -ForegroundColor Green
+        return $true
     }
-    $result = Receive-Job $job -ErrorAction SilentlyContinue
-    Remove-Job $job -Force
-    if ($result -and $result -is [string] -and $result.Length -gt 0) {
-        Write-Host "`r  ✓ $Msg 完成" -ForegroundColor Green
-    } else {
-        Write-Host "`r  ✓ $Msg 完成" -ForegroundColor Green
-    }
+    Write-Host "`r  ✗ $Msg 失败 (${secs}s)" -ForegroundColor Red
+    return $false
 }
 
 # ---- 检测包管理器 ----
@@ -96,41 +93,72 @@ Write-Host ""
 # --------------------------------------------
 Write-Step "2/4" "检查终端工具"
 
-function Install-Tool($Cmd, $WingetId, $ScoopId) {
+# 合并 Machine/User PATH 并保留当前进程已有的额外条目（如 conda、临时路径）
+function Refresh-Path {
+    $combined = @()
+    foreach ($part in @(
+        [Environment]::GetEnvironmentVariable('Path', 'Machine'),
+        [Environment]::GetEnvironmentVariable('Path', 'User')
+    )) {
+        if ($part) { $combined += $part -split ';' }
+    }
+    foreach ($entry in ($env:Path -split ';')) {
+        if ($entry -and ($combined -notcontains $entry)) { $combined += $entry }
+    }
+    $env:Path = ($combined | Where-Object { $_ } | Select-Object -Unique) -join ';'
+}
+
+function Install-Tool($Cmd, $WingetId, $ScoopId, [scriptblock]$Fallback) {
     try {
         $exists = Get-Command $Cmd -ErrorAction Stop
         Write-Success "$Cmd 已安装 ($($exists.Source))"
-        return
+        return $true
     } catch {}
 
-    if ($winget) {
-        Write-Host "  ⏳ winget install $WingetId ..." -ForegroundColor Yellow
-        $sb = { param($id) winget install --id $id --silent --accept-package-agreements --accept-source-agreements 2>&1 | Out-Null }
-        Invoke-Pending "winget install $WingetId" { winget install --id $WingetId --silent --accept-package-agreements --accept-source-agreements 2>&1 | Out-Null }
-        if ($LASTEXITCODE -eq 0) {
+    if ($winget -and $WingetId) {
+        if (Invoke-Pending "winget install $WingetId" {
+            winget install --id $WingetId --silent --accept-package-agreements --accept-source-agreements 2>&1 | Out-Null
+            $LASTEXITCODE -eq 0
+        }) {
             Write-Success "$Cmd 安装完成"
-            return
+            Refresh-Path
+            return $true
         }
+        Write-Warn "winget 安装 $Cmd 失败，尝试其他方式"
     }
     if ($scoop -and $ScoopId) {
-        Invoke-Pending "scoop install $ScoopId" { scoop install $ScoopId 2>&1 | Out-Null }
-        Write-Success "$Cmd 安装完成"
-        return
+        if (Invoke-Pending "scoop install $ScoopId" {
+            scoop install $ScoopId 2>&1 | Out-Null
+            $LASTEXITCODE -eq 0
+        }) {
+            Write-Success "$Cmd 安装完成"
+            Refresh-Path
+            return $true
+        }
+        Write-Warn "scoop 安装 $Cmd 失败"
+    }
+    if ($Fallback) {
+        if (Invoke-Pending "cargo install $Cmd" $Fallback) {
+            Write-Success "$Cmd 安装完成"
+            Refresh-Path
+            return $true
+        }
+        Write-Warn "cargo 安装 $Cmd 失败"
     }
     Write-Error "无法安装 $Cmd，请手动安装"
+    return $false
 }
 
-# Git 先装
+# Git 先装（Install-Tool 内部会自动刷新 PATH）
 Install-Tool "git" "Git.Git" "git"
-
-# 刷新 PATH
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + `
-            [System.Environment]::GetEnvironmentVariable("Path","User")
 
 Install-Tool "wezterm" "wez.wezterm"                "wezterm"
 Install-Tool "nvim"    "Neovim.Neovim"              "neovim"
-Install-Tool "lazygit" "Jesseduffield.lazygit"      "lazygit"
-Install-Tool "herdr"   "herdr.herdr"                "herdr"
+Install-Tool "lazygit" "JesseDuffield.lazygit"      "lazygit"
+# herdr 无 winget/scoop 包，回退 cargo install（与 Linux 脚本一致）
+Install-Tool "herdr"   "herdr.herdr"                "herdr" {
+    try { cargo install herdr 2>&1 | Out-Null; $LASTEXITCODE -eq 0 } catch { $false }
+}
 Write-Host ""
 
 # --------------------------------------------
@@ -166,9 +194,12 @@ if (Test-Path $NvimConfig) {
     Write-Warn "已备份旧 nvim 配置 → $(Split-Path $Backup -Leaf)"
 }
 
-Invoke-Pending "git clone my-nvim" { git clone $RepoUrl $NvimConfig 2>&1 | Out-Null }
+$cloneOk = Invoke-Pending "git clone my-nvim" {
+    git clone $RepoUrl $NvimConfig 2>&1 | Out-Null
+    $LASTEXITCODE -eq 0
+}
 
-if (Test-Path (Join-Path $NvimConfig ".git")) {
+if ($cloneOk -and (Test-Path (Join-Path $NvimConfig ".git"))) {
     Write-Success "nvim 配置克隆完成 → $NvimConfig"
 }
 else {
