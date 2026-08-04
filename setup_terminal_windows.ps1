@@ -108,7 +108,7 @@ function Refresh-Path {
     $env:Path = ($combined | Where-Object { $_ } | Select-Object -Unique) -join ';'
 }
 
-function Install-Tool($Cmd, $WingetId, $ScoopId, [scriptblock]$Fallback) {
+function Install-Tool($Cmd, $WingetId, $ScoopId, [scriptblock]$Fallback, [string]$ManualHint = "") {
     try {
         $exists = Get-Command $Cmd -ErrorAction Stop
         Write-Success "$Cmd 已安装 ($($exists.Source))"
@@ -145,20 +145,29 @@ function Install-Tool($Cmd, $WingetId, $ScoopId, [scriptblock]$Fallback) {
         }
         Write-Warn "cargo 安装 $Cmd 失败"
     }
+    # 兜底：winget 对"已安装但无可用更新"会返回非零码，
+    # 刷新 PATH 后重新检测，避免会话 PATH 过期导致误报失败
+    Refresh-Path
+    try {
+        Get-Command $Cmd -ErrorAction Stop | Out-Null
+        Write-Success "$Cmd 已可用"
+        return $true
+    } catch {}
     Write-Error "无法安装 $Cmd，请手动安装"
+    if ($ManualHint) { Write-Warn $ManualHint }
     return $false
 }
 
 # Git 先装（Install-Tool 内部会自动刷新 PATH）
-Install-Tool "git" "Git.Git" "git"
+$null = Install-Tool "git" "Git.Git" "git"
 
-Install-Tool "wezterm" "wez.wezterm"                "wezterm"
-Install-Tool "nvim"    "Neovim.Neovim"              "neovim"
-Install-Tool "lazygit" "JesseDuffield.lazygit"      "lazygit"
+$null = Install-Tool "wezterm" "wez.wezterm"                "wezterm"
+$null = Install-Tool "nvim"    "Neovim.Neovim"              "neovim"
+$null = Install-Tool "lazygit" "JesseDuffield.lazygit"      "lazygit"
 # herdr 无 winget/scoop 包，回退 cargo install（与 Linux 脚本一致）
-Install-Tool "herdr"   "herdr.herdr"                "herdr" {
+$null = Install-Tool "herdr"   "herdr.herdr"                "herdr" {
     try { cargo install herdr 2>&1 | Out-Null; $LASTEXITCODE -eq 0 } catch { $false }
-}
+} "手动安装: winget install Rustlang.Rustup 后执行 cargo install herdr"
 Write-Host ""
 
 # --------------------------------------------
