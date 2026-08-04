@@ -58,7 +58,7 @@ function Invoke-Pending($Msg, $ScriptBlock) {
     return $false
 }
 
-# 实时流式执行本机命令：逐步显示每一步输出与耗时，返回成败
+# 流式执行本机命令：\r 进度原地刷新不堆叠，普通行逐行显示，返回成败
 function Invoke-Streaming($Label, [string[]]$CommandArgs) {
     if (-not $CommandArgs -or $CommandArgs.Count -eq 0) { return $false }
     Write-Host "  ┌─ $Label" -ForegroundColor Yellow
@@ -70,17 +70,83 @@ function Invoke-Streaming($Label, [string[]]$CommandArgs) {
         return $false
     }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $cmdName = $CommandArgs[0]
-    $cmdArgs = if ($CommandArgs.Count -gt 1) { @($CommandArgs[1..($CommandArgs.Count - 1)]) } else { @() }
-    & $cmdName @cmdArgs 2>&1 | ForEach-Object {
-        $text = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { "$_" }
-        $text = $text -replace "`r", ""
-        if ($text) {
-            Write-Host "  │ $text" -ForegroundColor DarkGray
-            Write-Log "  │ $text"
+
+    # cmd /c "cmd args 2>&1" 合并 stderr→stdout，逐字节读取以支持 \r 进度刷新
+    $argStr = @($CommandArgs | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join ' '
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "cmd.exe"
+    $psi.Arguments = "/d /c `"$argStr 2>&1`""
+    $psi.RedirectStandardOutput = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $reader = $p.StandardOutput.BaseStream
+    $buf = New-Object byte[] 4096
+    $cur = New-Object System.Text.StringBuilder
+    $sawCR = $false
+    $progWidth = 0
+    $lastRefreshSeg = ""
+    $logLine = ""
+    try {
+        while ($true) {
+            $n = $reader.Read($buf, 0, $buf.Length)
+            if ($n -le 0) { break }
+            for ($i = 0; $i -lt $n; $i++) {
+                $c = $buf[$i]
+                if ($c -eq 10) {          # \n：一行结束
+                    $seg = $cur.ToString().TrimEnd()
+                    [void]$cur.Clear()
+                    if ($sawCR) {         # 进度组/CRLF 行：补出最终段后换行
+                        if ($seg) {
+                            if ($seg.Length -lt $progWidth) { $seg = $seg.PadRight($progWidth) }
+                            Write-Host "`r  │ $seg" -NoNewline -ForegroundColor DarkGray
+                            $logLine = $seg.TrimEnd()
+                        } elseif ($lastRefreshSeg) {
+                            $logLine = $lastRefreshSeg
+                        }
+                        Write-Host ""
+                    } elseif ($seg) {     # 普通 LF 行
+                        Write-Host "  │ $seg" -ForegroundColor DarkGray
+                        $logLine = $seg
+                    }
+                    if ($logLine) { Write-Log "  │ $logLine"; $logLine = "" }
+                    $sawCR = $false
+                    $progWidth = 0
+                    $lastRefreshSeg = ""
+                } elseif ($c -eq 13) {    # \r：进度刷新点
+                    $seg = $cur.ToString().TrimEnd()
+                    [void]$cur.Clear()
+                    $sawCR = $true
+                    if ($seg) {
+                        if ($seg.Length -lt $progWidth) { $seg = $seg.PadRight($progWidth) } else { $progWidth = $seg.Length }
+                        Write-Host "`r  │ $seg" -NoNewline -ForegroundColor DarkGray
+                        $lastRefreshSeg = $seg.TrimEnd()
+                    }
+                } else {
+                    [void]$cur.Append([char]$c)
+                }
+            }
         }
+        # EOF 残留（输出未以换行结尾）
+        $seg = $cur.ToString().TrimEnd()
+        if ($seg) {
+            if ($sawCR) {
+                if ($seg.Length -lt $progWidth) { $seg = $seg.PadRight($progWidth) }
+                Write-Host "`r  │ $seg" -NoNewline -ForegroundColor DarkGray
+                Write-Host ""
+            } else {
+                Write-Host "  │ $seg" -ForegroundColor DarkGray
+            }
+            Write-Log "  │ $seg"
+        } elseif ($sawCR) {
+            Write-Host ""
+        }
+    } finally {
+        $null = $p.WaitForExit()
+        $reader.Close()
     }
-    $ok = ($LASTEXITCODE -eq 0)
+    $ok = ($p.ExitCode -eq 0)
     $sw.Stop()
     $secs = [math]::Round($sw.Elapsed.TotalSeconds, 1)
     if ($ok) {
