@@ -3,6 +3,44 @@ local act = wezterm.action
 
 local config = wezterm.config_builder()
 
+-- 默认 shell：优先 pwsh（PowerShell 7），回退 powershell（5.1），最后 cmd
+local function file_exists(p)
+  if not p then return false end
+  local f = io.open(p, 'r')
+  if f then
+    f:close()
+    return true
+  end
+  return false
+end
+
+local function find_in_path(name)
+  local path = os.getenv('PATH') or ''
+  for dir in path:gmatch('[^;]+') do
+    dir = dir:gsub('\\$', '')
+    local p = dir .. '\\' .. name
+    if file_exists(p) then return p end
+  end
+  return nil
+end
+
+local function resolve_default_prog()
+  local windir = os.getenv('WINDIR') or 'C:\\Windows'
+  local candidates = {
+    find_in_path('pwsh.exe'),
+    'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+    find_in_path('powershell.exe'),
+    windir .. '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    os.getenv('COMSPEC'),
+  }
+  for _, p in ipairs(candidates) do
+    if file_exists(p) then return { p } end
+  end
+  return { 'cmd.exe' }
+end
+
+config.default_prog = resolve_default_prog()
+
 config.font = wezterm.font_with_fallback {
   'JetBrains Mono',
   'Menlo',
