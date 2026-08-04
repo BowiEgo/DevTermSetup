@@ -185,6 +185,53 @@ install_herdr() {
     return 1
 }
 
+# 解析默认 shell（与 .wezterm.lua 相同的回退策略：$SHELL → zsh → bash → fish → pwsh → sh）
+resolve_shell() {
+    local shell="$SHELL"
+    [ -n "$shell" ] && [ -x "$shell" ] && { echo "$shell"; return 0; }
+    local c p
+    for c in zsh bash fish pwsh sh; do
+        p="$(command -v "$c" 2>/dev/null)"
+        [ -n "$p" ] && { echo "$p"; return 0; }
+    done
+    echo "/bin/sh"
+}
+
+# 写入 herdr 配置：设置 [terminal] default_shell，保留其他配置并备份
+configure_herdr_shell() {
+    local config_file="$HOME/.config/herdr/config.toml"
+    local shell_path
+    shell_path="$(resolve_shell)"
+    mkdir -p "$(dirname "$config_file")"
+    if [ -f "$config_file" ]; then
+        cp "$config_file" "$config_file.backup.$(date +%Y%m%d%H%M%S)"
+        warn "已备份 herdr 配置 → ${config_file}.backup.*"
+    else
+        : > "$config_file"
+    fi
+    awk -v shell="$shell_path" '
+        BEGIN { in_term = 0; done = 0 }
+        /^[[:space:]]*\[terminal\][[:space:]]*$/ { in_term = 1; print; next }
+        /^[[:space:]]*\[/ {
+            if (in_term && !done) { print "default_shell = \"" shell "\""; done = 1 }
+            in_term = 0
+        }
+        in_term && /^[[:space:]]*default_shell[[:space:]]*=/ {
+            print "default_shell = \"" shell "\""
+            done = 1
+            next
+        }
+        { print }
+        END {
+            if (!done) {
+                if (!in_term) { print ""; print "[terminal]" }
+                print "default_shell = \"" shell "\""
+            }
+        }
+    ' "$config_file" > "$config_file.tmp" && mv "$config_file.tmp" "$config_file"
+    success "herdr default_shell → $shell_path"
+}
+
 # ---- 检测包管理器 ----
 if ! command -v brew &>/dev/null; then
     PKG="unknown"
@@ -277,6 +324,16 @@ if [ -f "$SCRIPT_DIR/.wezterm.lua" ]; then
     success ".wezterm.lua → ~/.wezterm.lua"
 else
     error "未找到 $SCRIPT_DIR/.wezterm.lua"
+fi
+echo ""
+
+# 部署 herdr 配置（与 WezTerm 相同的 shell 选择策略）
+if command -v herdr >/dev/null 2>&1; then
+    printf "  ${YELLOW}┌─${NC} 部署 herdr 配置\n"
+    configure_herdr_shell
+    stream "herdr config check" herdr config check
+else
+    info "未安装 herdr，跳过 herdr 配置"
 fi
 echo ""
 

@@ -310,6 +310,53 @@ function Install-HerdrWithProgress {
     }
 }
 
+# 解析默认 shell（与 .wezterm.lua 相同的回退策略：pwsh → powershell → cmd）
+function Resolve-Shell {
+    $candidates = @(
+        (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source,
+        'C:\Program Files\PowerShell\7\pwsh.exe',
+        (Get-Command powershell.exe -ErrorAction SilentlyContinue).Source,
+        (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'),
+        $env:COMSPEC
+    )
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path $c)) { return $c }
+    }
+    return 'cmd.exe'
+}
+
+# 写入 herdr 配置：设置 [terminal] default_shell，保留其他配置并备份
+function Configure-HerdrShell {
+    $configFile = Join-Path $env:APPDATA "herdr\config.toml"
+    $shell = Resolve-Shell
+    try {
+        if (Test-Path $configFile) {
+            $Backup = "$configFile.backup.$(Get-Date -Format 'yyyyMMddHHmmss')"
+            Copy-Item $configFile $Backup
+            Write-Warn "已备份 herdr 配置 → $(Split-Path $Backup -Leaf)"
+        }
+        New-Item -ItemType Directory -Force -Path (Split-Path $configFile) | Out-Null
+        $content = if (Test-Path $configFile) { [System.IO.File]::ReadAllText($configFile) } else { "" }
+        $shellEscaped = $shell -replace '\\', '\\'
+        $entry = "default_shell = `"$shellEscaped`""
+        if ($content -match '(?m)^[ \t]*\[terminal\]') {
+            if ($content -match '(?m)^[ \t]*default_shell[ \t]*=') {
+                $content = $content -replace '(?m)^[ \t]*default_shell[ \t]*=[^\r\n]*$', $entry
+            } else {
+                $content = $content -replace '(?m)(^[ \t]*\[terminal\][^\r\n]*)', "`$1`r`n$entry"
+            }
+        } else {
+            $content = $content.TrimEnd() + "`r`n`r`n[terminal]`r`n$entry`r`n"
+        }
+        [System.IO.File]::WriteAllText($configFile, $content, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Success "herdr default_shell → $shell"
+        return $true
+    } catch {
+        Write-Error "写入 herdr 配置失败: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 # ---- 检测包管理器 ----
 $winget = $null; try { $winget = Get-Command winget -ErrorAction Stop } catch {}
 $scoop  = $null; try { $scoop  = Get-Command scoop  -ErrorAction Stop } catch {}
@@ -455,6 +502,18 @@ if (Test-Path $WeztermSrc) {
 }
 else {
     Write-Error "未找到 $WeztermSrc"
+}
+Write-Host ""
+
+# 部署 herdr 配置（与 WezTerm 相同的 shell 选择策略）
+Refresh-Path
+if (Get-Command herdr -ErrorAction SilentlyContinue) {
+    Write-Host "  ┌─ 部署 herdr 配置" -ForegroundColor Yellow
+    $null = Configure-HerdrShell
+    $herdrExe = (Get-Command herdr -ErrorAction SilentlyContinue).Source
+    $null = Invoke-Streaming "herdr config check" @($herdrExe, "config", "check")
+} else {
+    Write-Info "未安装 herdr，跳过 herdr 配置"
 }
 Write-Host ""
 
