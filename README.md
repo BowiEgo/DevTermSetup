@@ -16,7 +16,7 @@ irm https://raw.githubusercontent.com/BowiEgo/DevTermSetup/main/setup.ps1 | iex
 curl -fsSL https://raw.githubusercontent.com/BowiEgo/DevTermSetup/main/setup.sh | bash
 ```
 
-引导脚本只做一件事：**确保 Node.js (≥18) 存在**，然后运行 `devterm-setup.js`。Node 缺失时自动安装（Windows 用 winget，macOS 用 brew，Linux 用系统包管理器，回退 nvm）。
+引导脚本只做两件事：**检测/确认代理设置**（显示当前代理 → Y/n/自定义 → 验证连通性），然后**确保 Node.js (≥18) 存在**（Windows 用 winget、macOS 用 brew、Linux 用系统包管理器、回退 nvm），随后运行 `devterm-setup.js`。代理在 Node 安装前就已生效，Node 本身的下载也走代理。
 
 ## Node 程序功能
 

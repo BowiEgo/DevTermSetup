@@ -14,6 +14,7 @@ BOLD='\033[1m'; DIM='\033[2m'
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; NC='\033[0m'
 success() { printf "  ${GREEN}✓${NC} %s\n" "$*"; }
+warn()    { printf "  ${YELLOW}⚠${NC}  %s\n" "$*"; }
 error()   { printf "  ${RED}✗${NC} %s\n" "$*"; }
 info()    { printf "  ${DIM}%s${NC}\n" "$*"; }
 
@@ -69,6 +70,50 @@ ensure_node() {
 
 echo ""
 printf "  ${CYAN}${BOLD}DevTermSetup · 引导${NC}\n"
+
+# ---- 代理检测（在安装 Node 之前）----
+detect_proxy() {
+    echo ""
+    info "http_proxy  = ${http_proxy:-未设置}"
+    info "https_proxy = ${https_proxy:-未设置}"
+    info "all_proxy   = ${all_proxy:-未设置}"
+    echo ""
+    read -p "  代理设置是否正确？[Y/n/自定义地址]: " proxy_ok
+    proxy_ok=${proxy_ok:-y}
+    case "$proxy_ok" in
+        [yY]*)
+            if [ -n "$http_proxy" ]; then
+                export HTTP_PROXY="$http_proxy"
+                export HTTPS_PROXY="${https_proxy:-$http_proxy}"
+                export all_proxy="${all_proxy:-$http_proxy}"
+                success "保持当前代理设置"
+            else
+                warn "未设置代理，将直连（可能较慢）"
+            fi
+            ;;
+        [nN]*)
+            warn "跳过代理设置（直连）"
+            ;;
+        *)
+            export http_proxy="$proxy_ok" https_proxy="$proxy_ok"
+            export HTTP_PROXY="$proxy_ok" HTTPS_PROXY="$proxy_ok" all_proxy="$proxy_ok"
+            success "已临时激活代理: $proxy_ok"
+            ;;
+    esac
+    # 验证代理连通性
+    if [ -n "$https_proxy" ]; then
+        info "验证代理连通性..."
+        if curl -fsSL --connect-timeout 5 -x "$https_proxy" https://raw.githubusercontent.com >/dev/null 2>&1; then
+            success "代理可用"
+        else
+            warn "代理验证失败，继续尝试直连（可能较慢）"
+        fi
+    fi
+    echo ""
+}
+detect_proxy
+
+# ---- 确保 Node.js (>= 18) ----
 ensure_node || exit 1
 
 # ---- 获取并运行 Node 安装程序 ----

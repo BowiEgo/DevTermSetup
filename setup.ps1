@@ -11,12 +11,52 @@
 $ErrorActionPreference = "Continue"
 
 function Write-Success($Text) { Write-Host "  ✓ $Text" -ForegroundColor Green }
-function Write-Error2($Text)  { Write-Host "  ✗ $Text" -ForegroundColor Red }
-function Write-Info($Text)    { Write-Host "  $Text" -ForegroundColor DarkGray }
+function Write-Warn($Text)   { Write-Host "  ⚠  $Text" -ForegroundColor DarkYellow }
+function Write-Error2($Text) { Write-Host "  ✗ $Text" -ForegroundColor Red }
+function Write-Info($Text)   { Write-Host "  $Text" -ForegroundColor DarkGray }
 
 # ---- 定位脚本源（本地 vs 远程）----
 $LocalDir = if ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { $null }
 $RemoteBase = if ($env:SETUP_REMOTE_BASE) { $env:SETUP_REMOTE_BASE } else { "https://raw.githubusercontent.com/BowiEgo/DevTermSetup/main" }
+
+# ---- 代理检测（在安装 Node 之前）----
+Write-Host ""
+Write-Host "  DevTermSetup · 引导" -ForegroundColor Cyan
+Write-Host ""
+Write-Info "http_proxy  = $(if($env:http_proxy){$env:http_proxy}else{'未设置'})"
+Write-Info "https_proxy = $(if($env:https_proxy){$env:https_proxy}else{'未设置'})"
+Write-Info "all_proxy   = $(if($env:all_proxy){$env:all_proxy}else{'未设置'})"
+Write-Host ""
+$proxy_ok = Read-Host "  代理设置是否正确？[Y/n/自定义地址]"
+if ([string]::IsNullOrEmpty($proxy_ok)) { $proxy_ok = "y" }
+switch -Wildcard ($proxy_ok) {
+    "y*" {
+        if ($env:http_proxy) {
+            $env:HTTP_PROXY  = $env:http_proxy
+            $env:HTTPS_PROXY = if($env:https_proxy){$env:https_proxy}else{$env:http_proxy}
+            $env:all_proxy   = if($env:all_proxy){$env:all_proxy}else{$env:http_proxy}
+            Write-Success "保持当前代理设置"
+        } else {
+            Write-Warn "未设置代理，将直连（可能较慢）"
+        }
+    }
+    "n*" { Write-Warn "跳过代理设置（直连）" }
+    default {
+        $env:http_proxy = $env:https_proxy = $env:HTTP_PROXY = $env:HTTPS_PROXY = $env:all_proxy = $proxy_ok
+        Write-Success "已临时激活代理: $proxy_ok"
+    }
+}
+# 验证代理连通性
+if ($env:https_proxy) {
+    Write-Info "验证代理连通性..."
+    try {
+        Invoke-WebRequest -Uri "https://raw.githubusercontent.com" -Proxy $env:https_proxy -TimeoutSec 8 -UseBasicParsing -Method Head -ErrorAction Stop | Out-Null
+        Write-Success "代理可用"
+    } catch {
+        Write-Warn "代理验证失败，继续尝试直连（可能较慢）"
+    }
+}
+Write-Host ""
 
 # ---- 确保 Node.js (>= 18) ----
 function Get-NodeMajor {
@@ -27,15 +67,14 @@ function Get-NodeMajor {
     return 0
 }
 
-Write-Host ""
-Write-Host "  DevTermSetup · 引导" -ForegroundColor Cyan
-
 $nodeMajor = Get-NodeMajor
 if ($nodeMajor -ge 18) {
     Write-Success "Node.js $(& node -v) 已就绪"
 } else {
     Write-Info "未检测到 Node.js，正在安装..."
-    winget install --id OpenJS.NodeJS -e --silent --accept-package-agreements --accept-source-agreements 2>&1 | Out-Null
+    $wingetArgs = @("install", "--id", "OpenJS.NodeJS", "-e", "--silent", "--accept-package-agreements", "--accept-source-agreements")
+    if ($env:https_proxy) { $wingetArgs += @("--proxy", $env:https_proxy) }
+    winget @wingetArgs 2>&1 | Out-Null
     # 刷新 PATH
     $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + `
                 [Environment]::GetEnvironmentVariable("Path", "User")
