@@ -42,25 +42,6 @@ function Write-Log($Text) {
     try { Add-Content -Path $ScriptLog -Value $Text -Encoding UTF8 -ErrorAction SilentlyContinue } catch {}
 }
 
-function Invoke-Pending($Msg, $ScriptBlock) {
-    Write-Host "  ⏳ $Msg ... " -NoNewline -ForegroundColor Yellow
-    Write-Log "==> $Msg"
-    # 同步执行：脚本块与调用方同作用域，父级变量/代理环境变量直接可用；
-    # 脚本块须以显式布尔表达式结尾（如 $LASTEXITCODE -eq 0）表示成败。
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $ok = & $ScriptBlock
-    $sw.Stop()
-    $secs = [math]::Round($sw.Elapsed.TotalSeconds, 1)
-    if ($ok) {
-        Write-Host "`r  ✓ $Msg 完成 (${secs}s)" -ForegroundColor Green
-        Write-Log "==> OK: $Msg (${secs}s)"
-        return $true
-    }
-    Write-Host "`r  ✗ $Msg 失败 (${secs}s)" -ForegroundColor Red
-    Write-Log "==> FAIL: $Msg (${secs}s)"
-    return $false
-}
-
 # 流式执行本机命令：\r 进度原地刷新不堆叠，普通行逐行显示，返回成败
 function Invoke-Streaming($Label, [string[]]$CommandArgs) {
     if (-not $CommandArgs -or $CommandArgs.Count -eq 0) { return $false }
@@ -162,6 +143,176 @@ function Invoke-Streaming($Label, [string[]]$CommandArgs) {
     return $ok
 }
 
+# 格式化下载进度行
+function Format-DownloadProgress($Label, $Done, $Total, $Speed) {
+    if ($Total -gt 0) {
+        $pct = [math]::Min(100, [math]::Round($Done / $Total * 100, 1))
+        $barLen = 20
+        $fill = [int][math]::Floor($pct / 100 * $barLen)
+        $bar = ('#' * $fill) + ('-' * ($barLen - $fill))
+        return ("{0}: {1,7:N1} / {2:N1} MiB  ({3,5:N1}%)  [{4}]  {5:N2} MiB/s" -f $Label, ($Done / 1MB), ($Total / 1MB), $pct, $bar, $Speed)
+    }
+    return ("{0}: {1:N1} MiB  {2:N2} MiB/s" -f $Label, ($Done / 1MB), $Speed)
+}
+
+# 流式下载并实时显示进度（大小/百分比/速度，\r 原地刷新）
+function Download-FileWithProgress($Url, $Dest, $Label = "下载") {
+    Write-Host "  ┌─ $Label" -ForegroundColor Yellow
+    Write-Log "==> $Label"
+    try {
+        # 兼容 TLS 1.2
+        if (-not ([Net.ServicePointManager]::SecurityProtocol.ToString().Contains("Tls12"))) {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        }
+        $req = [System.Net.HttpWebRequest]::Create($Url)
+        $req.UserAgent = "DevTermSetup/1.0"
+        $req.Timeout = 600000
+        $req.ReadWriteTimeout = 600000
+        $req.AllowAutoRedirect = $true
+        if ($Url -like "https:*" -and $env:https_proxy) { $req.Proxy = New-Object System.Net.WebProxy($env:https_proxy) }
+        elseif ($Url -like "http:*" -and $env:http_proxy) { $req.Proxy = New-Object System.Net.WebProxy($env:http_proxy) }
+
+        $resp = $req.GetResponse()
+        $total = [long]0
+        try { $total = [long]$resp.ContentLength } catch {}
+        if ($total -lt 0) { $total = 0 }
+        $src = $resp.GetResponseStream()
+        $fs = [System.IO.File]::Create($Dest)
+        $buf = New-Object byte[] 65536
+        $done = [long]0
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $lastTick = [Environment]::TickCount
+        $lastDone = [long]0
+        $speed = 0.0
+        $maxW = 0
+        try {
+            while ($true) {
+                $n = $src.Read($buf, 0, $buf.Length)
+                if ($n -le 0) { break }
+                $fs.Write($buf, 0, $n)
+                $done += $n
+                $now = [Environment]::TickCount
+                if ($now - $lastTick -ge 100) {
+                    $speed = ($done - $lastDone) / [Math]::Max(1, ($now - $lastTick)) * 1000 / 1MB
+                    $lastDone = $done; $lastTick = $now
+                    $line = Format-DownloadProgress $Label $done $total $speed
+                    if ($line.Length -lt $maxW) { $line = $line.PadRight($maxW) } else { $maxW = $line.Length }
+                    Write-Host "`r  │ $line" -NoNewline -ForegroundColor DarkGray
+                }
+            }
+        } finally {
+            $fs.Close(); $src.Close(); $resp.Close()
+        }
+        $sw.Stop()
+        $secs = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+        $speed = $done / [Math]::Max(1, $sw.Elapsed.TotalSeconds) / 1MB
+        $line = Format-DownloadProgress $Label $done $total $speed
+        if ($line.Length -lt $maxW) { $line = $line.PadRight($maxW) }
+        Write-Host "`r  │ $line" -NoNewline -ForegroundColor DarkGray
+        Write-Host ""
+        Write-Log "  │ $line"
+        if ($total -gt 0 -and $done -ne $total) {
+            Write-Host "  └─ ⚠ $Label 下载不完整 ($done/$total 字节)" -ForegroundColor DarkYellow
+            Write-Log "==> PARTIAL: $Label ($done/$total)"
+            return $false
+        }
+        Write-Host "  └─ ✓ $Label 完成 (${secs}s)" -ForegroundColor Green
+        Write-Log "==> OK: $Label (${secs}s)"
+        return $true
+    } catch {
+        Write-Host "  └─ ✗ $Label 失败: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Log "==> FAIL: $Label $($_.Exception.Message)"
+        return $false
+    }
+}
+
+# 原生控制台执行（不重定向输出），让 winget 等显示自己的下载进度条；返回成败
+function Invoke-Console($Label, [string[]]$CommandArgs) {
+    if (-not $CommandArgs -or $CommandArgs.Count -eq 0) { return $false }
+    Write-Host "  ┌─ $Label" -ForegroundColor Yellow
+    Write-Log "==> $Label"
+    $cmdExe = Get-Command $CommandArgs[0] -ErrorAction SilentlyContinue
+    if (-not $cmdExe) {
+        Write-Host "  └─ ✗ $Label 失败 (未找到命令 $($CommandArgs[0]))" -ForegroundColor Red
+        Write-Log "==> FAIL: $Label (未找到命令 $($CommandArgs[0]))"
+        return $false
+    }
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    # Start-Process -NoNewWindow：子进程直连控制台（winget 显示原生下载进度条），输出不被捕获
+    $args2 = if ($CommandArgs.Count -gt 1) { @($CommandArgs[1..($CommandArgs.Count - 1)]) } else { @() }
+    $p = Start-Process -FilePath $cmdExe.Source -ArgumentList $args2 -NoNewWindow -Wait -PassThru
+    $ok = ($p.ExitCode -eq 0)
+    $sw.Stop()
+    $secs = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+    if ($ok) {
+        Write-Host "  └─ ✓ $Label 完成 (${secs}s)" -ForegroundColor Green
+        Write-Log "==> OK: $Label (${secs}s)"
+    } else {
+        Write-Host "  └─ ✗ $Label 失败 (${secs}s)" -ForegroundColor Red
+        Write-Log "==> FAIL: $Label (${secs}s)"
+    }
+    return $ok
+}
+
+# herdr 官方安装：解析 manifest → 带进度下载 → SHA256 校验 → 解压 → 官方安装器收尾
+function Install-HerdrWithProgress {
+    try {
+        Write-Host "  ⏳ 获取 herdr 版本信息 ..." -ForegroundColor Yellow
+        Write-Log "==> 获取 herdr manifest"
+        $manifest = Invoke-RestMethod -Uri "https://herdr.dev/preview.json" -TimeoutSec 60
+        $baseVersion = [string]$manifest.base_version
+        $buildId = [string]$manifest.build_id
+        if (-not $baseVersion -or -not $buildId) { throw "无法解析 herdr 版本信息" }
+        $versionIdentity = "$baseVersion-preview.$buildId"
+        $asset = $manifest.assets.'windows-x86_64'
+        if (-not $asset -or -not $asset.url) { throw "manifest 中未找到 Windows 资产" }
+        $url = [string]$asset.url
+        $sha256 = [string]$asset.sha256
+        Write-Host "  └─ ✓ 版本: $versionIdentity" -ForegroundColor Green
+
+        $safeVer = $versionIdentity -replace '[^0-9A-Za-z._-]', '-'
+        $releaseName = "$safeVer-x86_64-pc-windows-msvc"
+        $releasesDir = Join-Path $env:USERPROFILE ".herdr\packages\standalone\releases"
+        $releaseDir  = Join-Path $releasesDir $releaseName
+        $zip = Join-Path $env:TEMP ("herdr-" + [guid]::NewGuid().ToString("N") + ".zip")
+
+        # 带进度下载
+        if (-not (Download-FileWithProgress $url $zip "下载 herdr $versionIdentity")) { return $false }
+
+        # SHA256 校验（用 .NET 实现，兼容性更稳）
+        if ($sha256) {
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            try {
+                $hash = [BitConverter]::ToString($sha.ComputeHash([System.IO.File]::ReadAllBytes($zip))).Replace("-", "").ToLowerInvariant()
+            } finally {
+                $sha.Dispose()
+            }
+            if ($hash -ne $sha256.ToLowerInvariant()) {
+                Write-Error "herdr 校验失败 (SHA256 不匹配)"
+                Remove-Item $zip -Force -ErrorAction SilentlyContinue
+                return $false
+            }
+            Write-Success "SHA256 校验通过"
+        }
+
+        # 解压到官方安装器约定的目录结构
+        New-Item -ItemType Directory -Force -Path $releasesDir | Out-Null
+        $staging = Join-Path $releasesDir ".staging.$releaseName"
+        Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path $releaseDir) { Remove-Item $releaseDir -Recurse -Force -ErrorAction SilentlyContinue }
+        Expand-Archive -LiteralPath $zip -DestinationPath $staging
+        Move-Item $staging $releaseDir
+        Remove-Item $zip -Force -ErrorAction SilentlyContinue
+        Write-Success "herdr 已解压到 $releaseDir"
+
+        # 官方安装器收尾：设置 junction + 更新 PATH（检测到已完整会跳过下载）
+        return (Invoke-Streaming "herdr 官方安装器收尾" @("powershell.exe","-NoProfile","-ExecutionPolicy","Bypass","-c","irm https://herdr.dev/install.ps1 | iex"))
+    } catch {
+        Write-Error "herdr 自动安装失败: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 # ---- 检测包管理器 ----
 $winget = $null; try { $winget = Get-Command winget -ErrorAction Stop } catch {}
 $scoop  = $null; try { $scoop  = Get-Command scoop  -ErrorAction Stop } catch {}
@@ -236,7 +387,7 @@ function Refresh-Path {
     $env:Path = ($combined | Where-Object { $_ } | Select-Object -Unique) -join ';'
 }
 
-function Install-Tool($Step, $Cmd, $WingetId, $ScoopId, [string[]]$OfficialArgs, [string]$OfficialInfo = "") {
+function Install-Tool($Step, $Cmd, $WingetId, $ScoopId, [scriptblock]$Official, [string]$OfficialInfo = "") {
     try {
         $exists = Get-Command $Cmd -ErrorAction Stop
         Write-Success "$Cmd 已安装 ($($exists.Source))"
@@ -245,7 +396,8 @@ function Install-Tool($Step, $Cmd, $WingetId, $ScoopId, [string[]]$OfficialArgs,
 
     $n = 1
     if ($winget -and $WingetId) {
-        if (Invoke-Streaming "[$Step.$n] winget 安装 $Cmd ($WingetId)" @("winget","install","--id",$WingetId,"--silent","--accept-package-agreements","--accept-source-agreements")) {
+        # 控制台直通执行：winget 会显示自己的下载进度条
+        if (Invoke-Console "[$Step.$n] winget 安装 $Cmd ($WingetId)" @("winget","install","--id",$WingetId,"--silent","--accept-package-agreements","--accept-source-agreements")) {
             Write-Success "$Cmd 安装完成"
             Refresh-Path
             return $true
@@ -262,19 +414,19 @@ function Install-Tool($Step, $Cmd, $WingetId, $ScoopId, [string[]]$OfficialArgs,
         Write-Warn "${Cmd}: scoop 失败"
         $n++
     }
-    if ($OfficialArgs) {
+    if ($Official) {
         Write-Host ""
         Write-Warn "无法自动安装 $Cmd"
         if ($OfficialInfo) { Write-Host "  ⚠  $OfficialInfo" -ForegroundColor DarkYellow }
-        $answer = Read-Host "  是否使用官方安装器自动安装 $Cmd？[Y/n]"
+        $answer = Read-Host "  是否自动安装 $Cmd？[Y/n]"
         if ([string]::IsNullOrEmpty($answer)) { $answer = "y" }
         if ($answer -match "^y") {
-            if (Invoke-Streaming "[$Step.$n] 官方安装器安装 $Cmd" $OfficialArgs) {
+            if (& $Official) {
                 Write-Success "$Cmd 安装完成"
                 Refresh-Path
                 return $true
             }
-            Write-Warn "${Cmd}: 官方安装器安装失败"
+            Write-Warn "${Cmd}: 自动安装失败"
         } else {
             Write-Warn "已跳过 $Cmd 自动安装"
         }
@@ -298,10 +450,9 @@ $null = Install-Tool "2.1" "git" "Git.Git" "git"
 $null = Install-Tool "2.2" "wezterm" "wez.wezterm"           "wezterm"
 $null = Install-Tool "2.3" "nvim"    "Neovim.Neovim"         "neovim"
 $null = Install-Tool "2.4" "lazygit" "JesseDuffield.lazygit" "lazygit"
-# herdr: 无 winget/scoop 包，失败后询问是否用官方安装器（预编译二进制）
-$herdrInstaller = @("powershell.exe","-NoProfile","-ExecutionPolicy","Bypass","-c","irm https://herdr.dev/install.ps1 | iex")
-$herdrInfo = "Herdr 官方安装器将下载约 22MB 预编译二进制（含 ConPTY 组件），视网络情况约需 10 秒 - 2 分钟"
-$null = Install-Tool "2.5" "herdr" "herdr.herdr" "herdr" $herdrInstaller $herdrInfo
+# herdr: 无 winget/scoop 包，失败后询问是否自动安装（带下载进度）
+$herdrInfo = "Herdr 将下载约 22MB 预编译二进制（含 ConPTY 组件），下载时显示实时进度，视网络情况约需 10 秒 - 2 分钟"
+$null = Install-Tool "2.5" "herdr" "herdr.herdr" "herdr" { Install-HerdrWithProgress } $herdrInfo
 Write-Host ""
 
 # --------------------------------------------
@@ -313,12 +464,7 @@ $WeztermSrc = Join-Path $ScriptSource ".wezterm.lua"
 # 也尝试从远程下载
 function Download-Config($Filename, $Dest) {
     if ($env:SETUP_REMOTE_BASE) {
-        if (Invoke-Pending "下载 $Filename" {
-            try {
-                Invoke-WebRequest -Uri "$env:SETUP_REMOTE_BASE/$Filename" -OutFile $Dest -ErrorAction Stop -UseBasicParsing | Out-Null
-                $true
-            } catch { $false }
-        }) {
+        if (Download-FileWithProgress "$env:SETUP_REMOTE_BASE/$Filename" $Dest "下载 $Filename") {
             return $true
         }
     }
