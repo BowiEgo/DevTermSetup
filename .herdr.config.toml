@@ -1,0 +1,18 @@
+# herdr 配置模板（由 DevTermSetup 安装脚本部署）
+#
+# 下方 [terminal] 中的 default_shell 值会在安装时自动解析替换，
+# 采用与 .wezterm.lua 相同的 shell 选择策略：
+#   Windows:      pwsh → powershell → cmd
+#   macOS/Linux:  $SHELL → zsh → bash → fish → pwsh → sh
+#
+# 可在此文件自由添加其他 herdr 配置项（theme、keybindings 等），
+# 安装脚本会完整部署到:
+#   Windows: %APPDATA%\herdr\config.toml
+#   macOS/Linux: ~/.config/herdr/config.toml
+
+[terminal]
+default_shell = "__DEFAULT_SHELL__"
+
+[theme]
+name = "gruvbox"
+auto_switch = false

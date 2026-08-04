@@ -197,39 +197,29 @@ resolve_shell() {
     echo "/bin/sh"
 }
 
-# 写入 herdr 配置：设置 [terminal] default_shell，保留其他配置并备份
-configure_herdr_shell() {
-    local config_file="$HOME/.config/herdr/config.toml"
-    local shell_path
+# 部署 herdr 配置：读取仓库模板(.herdr.config.toml) → 解析 shell → 替换占位符 → 写入
+deploy_herdr_config() {
+    local template_file="$1"
+    if [ ! -f "$template_file" ]; then
+        warn "未找到 herdr 配置模板，跳过"
+        return 1
+    fi
+    local shell_path config_file content
     shell_path="$(resolve_shell)"
+    config_file="$HOME/.config/herdr/config.toml"
+    content="$(cat "$template_file")"
+    content="${content//__DEFAULT_SHELL__/$shell_path}"
+    if printf '%s' "$content" | grep -q '__DEFAULT_SHELL__'; then
+        warn "模板占位符未替换，跳过写入"
+        return 1
+    fi
     mkdir -p "$(dirname "$config_file")"
     if [ -f "$config_file" ]; then
         cp "$config_file" "$config_file.backup.$(date +%Y%m%d%H%M%S)"
         warn "已备份 herdr 配置 → ${config_file}.backup.*"
-    else
-        : > "$config_file"
     fi
-    awk -v shell="$shell_path" '
-        BEGIN { in_term = 0; done = 0 }
-        /^[[:space:]]*\[terminal\][[:space:]]*$/ { in_term = 1; print; next }
-        /^[[:space:]]*\[/ {
-            if (in_term && !done) { print "default_shell = \"" shell "\""; done = 1 }
-            in_term = 0
-        }
-        in_term && /^[[:space:]]*default_shell[[:space:]]*=/ {
-            print "default_shell = \"" shell "\""
-            done = 1
-            next
-        }
-        { print }
-        END {
-            if (!done) {
-                if (!in_term) { print ""; print "[terminal]" }
-                print "default_shell = \"" shell "\""
-            }
-        }
-    ' "$config_file" > "$config_file.tmp" && mv "$config_file.tmp" "$config_file"
-    success "herdr default_shell → $shell_path"
+    printf '%s\n' "$content" > "$config_file"
+    success "herdr 配置已部署 → $config_file (default_shell: $shell_path)"
 }
 
 # ---- 检测包管理器 ----
@@ -327,10 +317,14 @@ else
 fi
 echo ""
 
-# 部署 herdr 配置（与 WezTerm 相同的 shell 选择策略）
+# 部署 herdr 配置（模板 .herdr.config.toml，与 .wezterm.lua 同方式读取）
 if command -v herdr >/dev/null 2>&1; then
     printf "  ${YELLOW}┌─${NC} 部署 herdr 配置\n"
-    configure_herdr_shell
+    if [ -f "$SCRIPT_DIR/.herdr.config.toml" ]; then
+        deploy_herdr_config "$SCRIPT_DIR/.herdr.config.toml"
+    else
+        warn "未找到 .herdr.config.toml，跳过 herdr 配置"
+    fi
     stream "herdr config check" herdr config check
 else
     info "未安装 herdr，跳过 herdr 配置"

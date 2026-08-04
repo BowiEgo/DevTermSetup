@@ -328,34 +328,34 @@ function Resolve-Shell {
     return 'cmd.exe'
 }
 
-# 写入 herdr 配置：设置 [terminal] default_shell，保留其他配置并备份
-function Configure-HerdrShell {
-    $configFile = Join-Path $env:APPDATA "herdr\config.toml"
-    $shell = Resolve-Shell
+# 部署 herdr 配置：读取仓库模板(.herdr.config.toml) → 解析 shell → 替换占位符 → 写入
+function Deploy-HerdrConfig($TemplatePath) {
+    if (-not $TemplatePath -or -not (Test-Path $TemplatePath)) {
+        Write-Warn "未找到 herdr 配置模板，跳过"
+        return $false
+    }
     try {
+        $template = [System.IO.File]::ReadAllText($TemplatePath)
+        $shell = Resolve-Shell
+        $shellEscaped = $shell -replace '\\', '\\'
+        $content = $template.Replace('__DEFAULT_SHELL__', $shellEscaped)
+        if ($content -match '__DEFAULT_SHELL__') {
+            Write-Warn "模板占位符未替换，跳过写入"
+            return $false
+        }
+        $configDir = Join-Path $env:APPDATA "herdr"
+        $configFile = Join-Path $configDir "config.toml"
         if (Test-Path $configFile) {
             $Backup = "$configFile.backup.$(Get-Date -Format 'yyyyMMddHHmmss')"
             Copy-Item $configFile $Backup
             Write-Warn "已备份 herdr 配置 → $(Split-Path $Backup -Leaf)"
         }
-        New-Item -ItemType Directory -Force -Path (Split-Path $configFile) | Out-Null
-        $content = if (Test-Path $configFile) { [System.IO.File]::ReadAllText($configFile) } else { "" }
-        $shellEscaped = $shell -replace '\\', '\\'
-        $entry = "default_shell = `"$shellEscaped`""
-        if ($content -match '(?m)^[ \t]*\[terminal\]') {
-            if ($content -match '(?m)^[ \t]*default_shell[ \t]*=') {
-                $content = $content -replace '(?m)^[ \t]*default_shell[ \t]*=[^\r\n]*$', $entry
-            } else {
-                $content = $content -replace '(?m)(^[ \t]*\[terminal\][^\r\n]*)', "`$1`r`n$entry"
-            }
-        } else {
-            $content = $content.TrimEnd() + "`r`n`r`n[terminal]`r`n$entry`r`n"
-        }
+        New-Item -ItemType Directory -Force -Path $configDir | Out-Null
         [System.IO.File]::WriteAllText($configFile, $content, (New-Object System.Text.UTF8Encoding($false)))
-        Write-Success "herdr default_shell → $shell"
+        Write-Success "herdr 配置已部署 → $configFile (default_shell: $shell)"
         return $true
     } catch {
-        Write-Error "写入 herdr 配置失败: $($_.Exception.Message)"
+        Write-Error "部署 herdr 配置失败: $($_.Exception.Message)"
         return $false
     }
 }
@@ -542,11 +542,18 @@ if (-not $copied) {
 }
 Write-Host ""
 
-# 部署 herdr 配置（与 WezTerm 相同的 shell 选择策略）
+# 部署 herdr 配置（模板 .herdr.config.toml，与 .wezterm.lua 同方式读取）
 Refresh-Path
 if (Get-Command herdr -ErrorAction SilentlyContinue) {
     Write-Host "  ┌─ 部署 herdr 配置" -ForegroundColor Yellow
-    $null = Configure-HerdrShell
+    $herdrSrc = Join-Path $ScriptSource ".herdr.config.toml"
+    if (Test-Path $herdrSrc) {
+        $null = Deploy-HerdrConfig $herdrSrc
+    } elseif (Download-Config ".herdr.config.toml" (Join-Path $env:TEMP ".herdr.config.toml")) {
+        $null = Deploy-HerdrConfig (Join-Path $env:TEMP ".herdr.config.toml")
+    } else {
+        Write-Warn "未找到 .herdr.config.toml，跳过 herdr 配置"
+    }
     $herdrExe = (Get-Command herdr -ErrorAction SilentlyContinue).Source
     $null = Invoke-Streaming "herdr config check" @($herdrExe, "config", "check")
 } else {
