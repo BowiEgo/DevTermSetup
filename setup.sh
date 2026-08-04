@@ -92,7 +92,7 @@ detect_proxy() {
     info "当前 http_proxy  = ${http_proxy:-未设置}"
     info "当前 https_proxy = ${https_proxy:-未设置}"
     echo ""
-    local default="${https_proxy:-http://127.0.0.1:7890}"
+    local default="${https_proxy:-http://127.0.0.1:7897}"
     local proxy_ok=""
     if [ -t 0 ]; then
         # 交互终端：预填可编辑（backspace 可改），清空回车=直连

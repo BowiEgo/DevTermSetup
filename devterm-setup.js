@@ -25,7 +25,7 @@ const readline = require('node:readline')
 
 /* ===== 常量 ===== */
 const VERSION = '2.0.0'
-const DEFAULT_PROXY = 'http://127.0.0.1:7890'
+const DEFAULT_PROXY = 'http://127.0.0.1:7897'
 const REMOTE_BRANCHES = ['nodeVersion', 'main'] // 合并到 main 后调整顺序
 const HOMEDIR = os.homedir()
 const IS_WINDOWS = process.platform === 'win32'
@@ -398,13 +398,15 @@ function ask(question, def = '') {
 }
 // text：TTY 下预填可编辑（backspace 可改），回车用默认
 function askEdit(question, initial = '') {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true })
   return new Promise((resolve) => {
     let done = false
     const finish = (a) => { if (!done) { done = true; rl.close(); resolve(a) } }
-    rl.question(`${question} `, finish)
+    rl.setPrompt(`${question} `)
+    rl.prompt()
+    if (process.stdin.isTTY && initial) rl.write(initial) // 预填到输入缓冲（可直接输入覆盖、backspace 修改）
+    rl.on('line', finish)
     rl.on('close', () => finish(''))
-    if (process.stdin.isTTY && initial) rl.write(initial)
   })
 }
 
@@ -509,6 +511,11 @@ async function setupProxy() {
       await httpsRequest('https://raw.githubusercontent.com')
       success('代理可用')
     } catch { warn('代理验证失败，继续尝试（可能较慢）') }
+  } else if (!process.stdin.isTTY) {
+    // 非交互（管道）：空输入使用默认代理（与引导脚本一致）
+    const proxy = initial
+    process.env.http_proxy = process.env.https_proxy = process.env.HTTP_PROXY = process.env.HTTPS_PROXY = process.env.all_proxy = proxy
+    success(`已使用代理: ${proxy}`)
   } else {
     warn('已选择直连（不使用代理）')
   }

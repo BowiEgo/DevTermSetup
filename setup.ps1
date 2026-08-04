@@ -32,6 +32,40 @@ function Get-RemoteScript {
     return $false
 }
 
+# ---- 可编辑预填输入（backspace 可修改）；非交互环境回退 Read-Host ----
+function Read-EditableLine {
+    param([string]$Initial = "", [string]$Prompt = "")
+    try {
+        if (-not [Console]::IsInputRedirected) {
+            [Console]::Write($Prompt)
+            [Console]::Write($Initial)
+            $sb = [System.Text.StringBuilder]::new($Initial)
+            while ($true) {
+                $key = [Console]::ReadKey($true)
+                if ($key.Key -eq [ConsoleKey]::Enter) { break }
+                elseif ($key.Key -eq [ConsoleKey]::Backspace) {
+                    if ($sb.Length -gt 0) {
+                        $sb.Length--
+                        [Console]::Write("`b `b")
+                    }
+                }
+                elseif ($key.Key -eq [ConsoleKey]::Escape) { return $Initial }
+                elseif ($key.KeyChar -ne 0 -and $key.KeyChar -notmatch "[\r\n]") {
+                    if (-not ($key.Modifiers -band ([ConsoleModifiers]::Control -bor [ConsoleModifiers]::Alt))) {
+                        [void]$sb.Append($key.KeyChar)
+                        [Console]::Write($key.KeyChar)
+                    }
+                }
+            }
+            [Console]::WriteLine()
+            return $sb.ToString()
+        }
+    } catch {}
+    # 非交互回退：空输入用默认值
+    $v = Read-Host $Prompt
+    return $(if ([string]::IsNullOrWhiteSpace($v)) { $Initial } else { $v })
+}
+
 # ---- 代理检测（在安装 Node 之前）----
 Write-Host ""
 Write-Host "  DevTermSetup · 引导" -ForegroundColor Cyan
@@ -39,11 +73,10 @@ Write-Host ""
 Write-Info "当前 http_proxy  = $(if($env:http_proxy){$env:http_proxy}else{'未设置'})"
 Write-Info "当前 https_proxy = $(if($env:https_proxy){$env:https_proxy}else{'未设置'})"
 Write-Host ""
-$default = if ($env:https_proxy) { $env:https_proxy } else { "http://127.0.0.1:7890" }
-Write-Info "回车使用默认: $default（输入覆盖；输入 direct 表示直连）"
-$proxy_ok = Read-Host "  代理地址"
-if ([string]::IsNullOrWhiteSpace($proxy_ok)) { $proxy_ok = $default }
-if ($proxy_ok -match "^(direct|none|off)$") {
+$default = if ($env:https_proxy) { $env:https_proxy } else { "http://127.0.0.1:7897" }
+Write-Info "代理地址（回车=默认/当前，直接输入覆盖，清空回车=直连）"
+$proxy_ok = Read-EditableLine -Initial $default -Prompt "  > "
+if ($proxy_ok -match "^(direct|none|off)$" -or [string]::IsNullOrWhiteSpace($proxy_ok)) {
     Write-Warn "已选择直连（不使用代理）"
 } elseif ($proxy_ok) {
     $env:http_proxy = $env:https_proxy = $env:HTTP_PROXY = $env:HTTPS_PROXY = $env:all_proxy = $proxy_ok
